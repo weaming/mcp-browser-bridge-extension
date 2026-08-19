@@ -2,6 +2,7 @@
 // 帧请求内部模拟应答),通过 HTTP 验证 MCP 协议与工具全链路。
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const PORT = 8792;
@@ -41,6 +42,7 @@ beforeAll(async () => {
       BROWSER_BRIDGE_MOCK: "1",
       BROWSER_BRIDGE_PORT: String(PORT),
       BROWSER_BRIDGE_PORT_FILE: "/tmp/browser-bridge-test-port", // 不污染共享端口文件
+      BROWSER_BRIDGE_CACHE_DIR: "/tmp/browser-bridge-test-cache", // 不污染共享缓存目录
     },
     stdout: "pipe",
     stderr: "pipe",
@@ -159,11 +161,12 @@ describe("MCP protocol", () => {
     expect(text).toBe("已关闭");
   });
 
-  test("browser_screenshot 返回截图 dataUrl", async () => {
+  test("browser_screenshot 保存到缓存并返回路径", async () => {
     const resp = await mcp("tools/call", { name: "browser_screenshot", arguments: {} });
     const text = (resp.result as { content: { text: string }[] }).content[0].text;
-    expect(text).toContain("截图成功");
-    expect(text).toContain("dataUrl");
+    expect(text).toContain("已保存截图:");
+    const file = text.split(": ")[1];
+    expect(existsSync(file)).toBe(true); // 文件真实存在
   });
 
   test("browser_highlight 高亮元素", async () => {

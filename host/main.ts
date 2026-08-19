@@ -6,7 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -22,6 +22,32 @@ const START_PORT = Number(process.env.BROWSER_BRIDGE_PORT ?? 1234);
 const PORT_FILE = process.env.BROWSER_BRIDGE_PORT_FILE ?? join(homedir(), ".browser-bridge", "port");
 const MOCK = process.env.BROWSER_BRIDGE_MOCK === "1";
 let port = START_PORT; // 实际监听端口,由下方端口探测决定
+
+// 截图缓存目录:保存到本地文件,返回路径而非 base64;启动时清理 3 天前的缓存
+const CACHE_DIR = process.env.BROWSER_BRIDGE_CACHE_DIR ?? join(homedir(), ".browser-bridge", "cache");
+const CACHE_TTL_MS = 3 * 24 * 3600 * 1000;
+
+function cleanCache(): void {
+  const now = Date.now();
+  let removed = 0;
+  for (const f of readdirSync(CACHE_DIR)) {
+    const p = join(CACHE_DIR, f);
+    try {
+      if (statSync(p).isFile() && now - statSync(p).mtimeMs > CACHE_TTL_MS) {
+        unlinkSync(p);
+        removed++;
+      }
+    } catch {
+      // 文件可能已被移除,忽略
+    }
+  }
+  if (removed > 0) console.error(`cache cleaned: removed ${removed} file(s) older than 3 days`);
+}
+
+mkdirSync(CACHE_DIR, { recursive: true });
+cleanCache();
+// 长运行时周期性清理(启动一次 + 每小时一次)
+setInterval(cleanCache, 3600 * 1000).unref?.();
 
 // ---------- native messaging 层(与扩展通信) ----------
 
@@ -197,10 +223,19 @@ function snapshotText(s: Snapshot): string {
 }
 
 // 工具注册表:SDK(会话模式)与无状态模式共用同一套定义与实现
+// handler 可返回纯文本,或结构化 content(如 image,让 AI 真正"看见"图片)
+interface ToolContentItem {
+  type: "text" | "image";
+  text?: string;
+  data?: string; // image 的 base64
+  mimeType?: string;
+}
+type ToolOutput = string | ToolContentItem[];
+
 interface ToolDef {
   description: string;
   schema: z.ZodRawShape; // 普通对象 shape,SDK tool() 原生支持
-  handler: (args: Record<string, unknown>) => Promise<string>;
+  handler: (args: Record<string, unknown>) => Promise<ToolOutput>;
 }
 
 const TOOLS = new Map<string, ToolDef>();
@@ -209,9 +244,14 @@ function tool(
   name: string,
   description: string,
   schema: z.ZodRawShape,
-  handler: (args: Record<string, unknown>) => Promise<string>,
+  handler: (args: Record<string, unknown>) => Promise<ToolOutput>,
 ): void {
   TOOLS.set(name, { description, schema, handler });
+}
+
+// 把 handler 输出统一成 MCP content 数组
+function toContent(out: ToolOutput): ToolContentItem[] {
+  return typeof out === "string" ? [{ type: "text", text: out }] : out;
 }
 
 async function executeAction(kind: Parameters<typeof actionFromArgs>[0], args: Record<string, unknown>): Promise<string> {
@@ -311,10 +351,22 @@ tool("browser_close_tab", "关闭标签页(tabId 缺省关闭当前控制目标;
   return "失败: 扩展无响应";
 });
 
-tool("browser_screenshot", "截取当前控制页面的可见区域并返回图片(dataUrl),用于视觉理解复杂布局", {}, async () => {
+tool("browser_screenshot", "截取当前控制页面的可见区域,保存到缓存目录并返回图片路径(AI 可读取该文件查看页面)", {}, async () => {
   const resp = await sendToExtension({ t: "screenshot", seq: ++seq });
   if (resp.t === "screenshot-result") {
-    if (resp.ok) return `截图成功(dataUrl, ${resp.dataUrl?.length ?? 0} 字符)`;
+    if (resp.ok && resp.dataUrl) {
+      const comma = resp.dataUrl.indexOf(",");
+      const meta = comma > 0 ? resp.dataUrl.slice(0, comma) : "";
+      const base64 = comma > 0 ? resp.dataUrl.slice(comma + 1) : "";
+      const ext = meta.includes("jpeg") ? "jpg" : "png";
+      const file = join(CACHE_DIR, `shot-${Date.now()}.${ext}`);
+      try {
+        Bun.write(file, Buffer.from(base64, "base64"));
+        return `已保存截图: ${file}`;
+      } catch (err) {
+        return `截图保存失败: ${String(err)}`;
+      }
+    }
     return `失败: ${resp.message ?? "未知"}`;
   }
   if (resp.t === "error") return `失败: ${resp.message}`;
@@ -458,9 +510,15 @@ tool(
 function createMcpServer(): McpServer {
   const mcp = new McpServer({ name: "browser-bridge", version: "0.1.0" });
   for (const [name, def] of TOOLS) {
-    mcp.tool(name, def.description, def.schema, async (args) => ({
-      content: [{ type: "text", text: await def.handler(args as Record<string, unknown>) }],
-    }));
+    // SDK 泛型重载无法从动态 schema/handler 推断,用 any 逃逸
+    (mcp as unknown as { tool: (n: string, d: string, s: unknown, cb: (a: Record<string, unknown>) => unknown) => unknown }).tool(
+      name,
+      def.description,
+      def.schema,
+      async (args: Record<string, unknown>) => ({
+        content: toContent(await def.handler(args)),
+      }),
+    );
   }
   return mcp;
 }
@@ -495,8 +553,8 @@ async function handleStateless(body: Record<string, unknown> | undefined, res: S
     const parsed = z.object(def.schema).safeParse(params.arguments ?? {});
     if (!parsed.success) return fail(-32602, `Invalid arguments: ${parsed.error.message}`);
     try {
-      const text = await def.handler(parsed.data as Record<string, unknown>);
-      return reply({ result: { content: [{ type: "text", text }] } });
+      const out = await def.handler(parsed.data as Record<string, unknown>);
+      return reply({ result: { content: toContent(out) } });
     } catch (err) {
       return fail(-32000, String(err));
     }
