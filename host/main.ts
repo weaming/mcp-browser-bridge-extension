@@ -10,6 +10,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { encodeFrame, FrameReader } from "./native-protocol";
@@ -91,6 +92,19 @@ function mockRespond(msg: FrameRequest): Promise<NativeResponse> {
   if (msg.t === "get-port") {
     return Promise.resolve({ t: "port-info", seq: msg.seq, port: START_PORT });
   }
+  if (msg.t === "new-tab") {
+    return Promise.resolve({
+      t: "new-tab-result",
+      seq: msg.seq,
+      ok: true,
+      tabId: 99,
+      title: "New Mock Tab",
+      url: msg.url ?? "",
+    });
+  }
+  if (msg.t === "close-tab") {
+    return Promise.resolve({ t: "close-tab-result", seq: msg.seq, ok: true });
+  }
   return Promise.resolve({ t: "execute-result", seq: msg.seq, ok: true });
 }
 
@@ -165,127 +179,214 @@ function snapshotText(s: Snapshot): string {
   return lines.join("\n");
 }
 
-const okText = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
-
-async function executeAction(kind: Parameters<typeof actionFromArgs>[0], args: Record<string, unknown>) {
-  const action = actionFromArgs(kind, args);
-  if (!("action" in action)) return okText(`参数错误: ${action.error}`);
-  const resp = await sendToExtension({ t: "execute", seq: ++seq, action });
-  if (resp.t === "execute-result") {
-    if (resp.ok) return okText("ok");
-    return okText(`失败: ${resp.code ?? "unknown"}${resp.detail ? ` — ${resp.detail}` : ""}`);
-  }
-  if (resp.t === "error") return okText(`失败: ${resp.message}`);
-  return okText("失败: 扩展无响应");
+// 工具注册表:SDK(会话模式)与无状态模式共用同一套定义与实现
+interface ToolDef {
+  description: string;
+  schema: z.ZodRawShape; // 普通对象 shape,SDK tool() 原生支持
+  handler: (args: Record<string, unknown>) => Promise<string>;
 }
 
-// ---------- MCP server ----------
+const TOOLS = new Map<string, ToolDef>();
 
-// SDK 的 Server 实例只能 connect 一次,每个 MCP session 创建独立实例。
-function createMcpServer(): McpServer {
-  const mcp = new McpServer({ name: "browser-bridge", version: "0.1.0" });
+function tool(
+  name: string,
+  description: string,
+  schema: z.ZodRawShape,
+  handler: (args: Record<string, unknown>) => Promise<string>,
+): void {
+  TOOLS.set(name, { description, schema, handler });
+}
 
-  mcp.tool("browser_snapshot", "获取当前受控页面的可交互元素快照(带 ref 编号与坐标),AI 据此决定后续操作", async () => {
+async function executeAction(kind: Parameters<typeof actionFromArgs>[0], args: Record<string, unknown>): Promise<string> {
+  const action = actionFromArgs(kind, args);
+  if (!("action" in action)) return `参数错误: ${action.error}`;
+  const resp = await sendToExtension({ t: "execute", seq: ++seq, action });
+  if (resp.t === "execute-result") {
+    if (resp.ok) return "ok";
+    return `失败: ${resp.code ?? "unknown"}${resp.detail ? ` — ${resp.detail}` : ""}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+}
+
+// ---------- MCP 工具定义(注册到 TOOLS 表) ----------
+
+tool("browser_snapshot", "获取当前受控页面的可交互元素快照(带 ref 编号与坐标),AI 据此决定后续操作", {}, async () => {
   const resp = await sendToExtension({ t: "snapshot", seq: ++seq });
-  if (resp.t === "snapshot") return okText(snapshotText(resp.snapshot));
-  if (resp.t === "error") return okText(`快照失败: ${resp.message}`);
-  return okText("快照失败: 扩展无响应");
+  if (resp.t === "snapshot") return snapshotText(resp.snapshot);
+  if (resp.t === "error") return `快照失败: ${resp.message}`;
+  return "快照失败: 扩展无响应";
 });
 
-mcp.tool(
+tool(
   "browser_click",
   "点击快照中 ref 编号的元素",
   { ref: z.number().int().positive(), button: z.enum(BUTTONS).optional() },
   async (args) => executeAction("click", args),
 );
 
-mcp.tool(
+tool(
   "browser_type",
   "向 ref 输入框输入文本(clear=true 先清空)",
   { ref: z.number().int().positive(), text: z.string(), clear: z.boolean().optional() },
   async (args) => executeAction("type", args),
 );
 
-mcp.tool("browser_press", "按键盘键(作用于当前聚焦元素)", { key: z.enum(PRESS_KEYS) }, async (args) =>
+tool("browser_press", "按键盘键(作用于当前聚焦元素)", { key: z.enum(PRESS_KEYS) }, async (args) =>
   executeAction("press", args),
 );
 
-mcp.tool(
+tool(
   "browser_select",
   "设置 ref 下拉框的选项值",
   { ref: z.number().int().positive(), value: z.string() },
   async (args) => executeAction("select", args),
 );
 
-mcp.tool(
+tool(
   "browser_scroll",
   "滚动视口(dir 方向,amount 像素;带 ref 时滚到该元素)",
   { dir: z.enum(SCROLL_DIRS), amount: z.number().int().optional(), ref: z.number().int().positive().optional() },
   async (args) => executeAction("scroll", args),
 );
 
-mcp.tool("browser_hover", "悬停 ref 元素(触发 hover 菜单)", { ref: z.number().int().positive() }, async (args) =>
+tool("browser_hover", "悬停 ref 元素(触发 hover 菜单)", { ref: z.number().int().positive() }, async (args) =>
   executeAction("hover", args),
 );
 
-mcp.tool("browser_goto", "跳转到指定 URL", { url: z.string() }, async (args) => executeAction("goto", args));
+tool("browser_goto", "跳转到指定 URL", { url: z.string() }, async (args) => executeAction("goto", args));
 
-mcp.tool("browser_back", "浏览器后退", async () => executeAction("back", {}));
+tool("browser_back", "浏览器后退", {}, async () => executeAction("back", {}));
 
-mcp.tool("browser_refresh", "刷新页面", async () => executeAction("refresh", {}));
+tool("browser_refresh", "刷新页面", {}, async () => executeAction("refresh", {}));
 
-  mcp.tool("browser_wait", "等待页面稳定(ms 毫秒,默认 800)", { ms: z.number().int().optional() }, async (args) =>
-    executeAction("wait", args),
-  );
+tool("browser_wait", "等待页面稳定(ms 毫秒,默认 800)", { ms: z.number().int().optional() }, async (args) =>
+  executeAction("wait", args),
+);
 
-  mcp.tool("browser_list_tabs", "列出所有打开的标签页(id/标题/URL),选择控制目标用", async () => {
-    const resp = await sendToExtension({ t: "list-tabs", seq: ++seq });
-    if (resp.t === "tabs") {
-      const lines = resp.tabs.map(
-        (t) => `[${t.id}] ${t.title} — ${t.url}${t.active ? " (当前激活)" : ""}`,
-      );
-      if (lines.length === 0) return okText("没有可控制的标签页(需 http/https 页面)");
-      return okText(lines.join("\n"));
-    }
-    if (resp.t === "error") return okText(`失败: ${resp.message}`);
-    return okText("失败: 扩展无响应");
+tool("browser_new_tab", "新建标签页并立即跳转(url 可选,缺省开空白新标签页)", { url: z.string().regex(/^https?:\/\//).optional() }, async (args) => {
+  const resp = await sendToExtension({
+    t: "new-tab",
+    seq: ++seq,
+    ...(typeof args.url === "string" ? { url: args.url } : {}),
   });
-
-  mcp.tool("browser_control_status", "查询当前控制目标标签页与桥连接状态", async () => {
-    const resp = await sendToExtension({ t: "get-target", seq: ++seq });
-    if (resp.t === "target-info") {
-      if (!resp.connected) return okText("桥未连接(扩展未加载或 host 未启动)");
-      if (!resp.target) {
-        return okText(
-          "没有可控制的标签页(当前激活页需是 http/https)。用 browser_list_tabs 查看,browser_use_tab 固定目标。",
-        );
-      }
-      if (resp.mode === "follow") {
-        return okText(
-          `跟随模式:控制你当前激活的标签页(当前: [${resp.target.tabId}] ${resp.target.title} — ${resp.target.url})。切换浏览器标签页即切换控制目标。`,
-        );
-      }
-      return okText(`已固定控制: [${resp.target.tabId}] ${resp.target.title} — ${resp.target.url}`);
+  if (resp.t === "new-tab-result") {
+    if (resp.ok) {
+      return `已打开新标签页: [${resp.tabId ?? "?"}] ${resp.title ?? ""} — ${resp.url || "(空白页)"}`;
     }
-    if (resp.t === "error") return okText(`失败: ${resp.message}`);
-    return okText("失败: 扩展无响应");
-  });
+    return `失败: ${resp.message ?? "未知"}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
 
-  mcp.tool(
-    "browser_use_tab",
-    "选择控制目标标签页(之后所有操作作用于该页);tabId=-1 表示取消固定,回到跟随模式(控制当前激活标签页)",
-    { tabId: z.number().int().refine((v) => v === -1 || v >= 1, "tabId 必须 >=1,或 -1 回到跟随模式") },
-    async (args) => {
-    const resp = await sendToExtension({ t: "set-target", seq: ++seq, tabId: args.tabId });
+tool("browser_close_tab", "关闭标签页(tabId 缺省关闭当前控制目标;关闭受控页后自动回到跟随模式)", { tabId: z.number().int().positive().optional() }, async (args) => {
+  const resp = await sendToExtension({
+    t: "close-tab",
+    seq: ++seq,
+    ...(typeof args.tabId === "number" ? { tabId: args.tabId } : {}),
+  });
+  if (resp.t === "close-tab-result") {
+    if (resp.ok) return "已关闭";
+    return `失败: ${resp.message ?? "未知"}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool("browser_list_tabs", "列出所有打开的标签页(id/标题/URL),选择控制目标用", {}, async () => {
+  const resp = await sendToExtension({ t: "list-tabs", seq: ++seq });
+  if (resp.t === "tabs") {
+    const lines = resp.tabs.map((t) => `[${t.id}] ${t.title} — ${t.url}${t.active ? " (当前激活)" : ""}`);
+    if (lines.length === 0) return "没有可控制的标签页(需 http/https 页面)";
+    return lines.join("\n");
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool("browser_control_status", "查询当前控制目标标签页与桥连接状态", {}, async () => {
+  const resp = await sendToExtension({ t: "get-target", seq: ++seq });
+  if (resp.t === "target-info") {
+    if (!resp.connected) return "桥未连接(扩展未加载或 host 未启动)";
+    if (!resp.target) {
+      return "没有可控制的标签页(当前激活页需是 http/https)。用 browser_list_tabs 查看,browser_use_tab 固定目标。";
+    }
+    if (resp.mode === "follow") {
+      return `跟随模式:控制你当前激活的标签页(当前: [${resp.target.tabId}] ${resp.target.title} — ${resp.target.url})。切换浏览器标签页即切换控制目标。`;
+    }
+    return `已固定控制: [${resp.target.tabId}] ${resp.target.title} — ${resp.target.url}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool(
+  "browser_use_tab",
+  "选择控制目标标签页(之后所有操作作用于该页);tabId=-1 表示取消固定,回到跟随模式(控制当前激活标签页)",
+  { tabId: z.number().int().refine((v) => v === -1 || v >= 1, "tabId 必须 >=1,或 -1 回到跟随模式") },
+  async (args) => {
+    const resp = await sendToExtension({ t: "set-target", seq: ++seq, tabId: args.tabId as number });
     if (resp.t === "set-target-result") {
-      if (resp.ok) return okText(`已切换目标: ${resp.message ?? `tab ${args.tabId}`}`);
-      return okText(`失败: ${resp.message ?? "未知"}`);
+      if (resp.ok) return `已切换目标: ${resp.message ?? `tab ${args.tabId}`}`;
+      return `失败: ${resp.message ?? "未知"}`;
     }
-    if (resp.t === "error") return okText(`失败: ${resp.message}`);
-    return okText("失败: 扩展无响应");
-  });
+    if (resp.t === "error") return `失败: ${resp.message}`;
+    return "失败: 扩展无响应";
+  },
+);
 
+// ---------- MCP server(会话模式) ----------
+
+// SDK 的 Server 实例只能 connect 一次,每个 MCP session 创建独立实例。
+function createMcpServer(): McpServer {
+  const mcp = new McpServer({ name: "browser-bridge", version: "0.1.0" });
+  for (const [name, def] of TOOLS) {
+    mcp.tool(name, def.description, def.schema, async (args) => ({
+      content: [{ type: "text", text: await def.handler(args as Record<string, unknown>) }],
+    }));
+  }
   return mcp;
+}
+
+// ---------- 无状态模式(2026-07-28 规范:跳过握手直接调用) ----------
+
+async function handleStateless(body: Record<string, unknown> | undefined, res: ServerResponse): Promise<void> {
+  const id = body?.id ?? null;
+  const reply = (payload: Record<string, unknown> | undefined, status = 200): void => {
+    res.statusCode = status;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ jsonrpc: "2.0", id, ...(payload ?? {}) }));
+  };
+  const fail = (code: number, message: string): void =>
+    reply({ error: { code, message } });
+
+  if (!body || body.method === undefined) {
+    return fail(-32700, "Parse error: Invalid JSON-RPC message");
+  }
+  if (body.method === "tools/list") {
+    const tools = [...TOOLS.entries()].map(([name, def]) => ({
+      name,
+      description: def.description,
+      inputSchema: zodToJsonSchema(z.object(def.schema) as never, { target: "openAi" }),
+    }));
+    return reply({ result: { tools } });
+  }
+  if (body.method === "tools/call") {
+    const params = (body.params ?? {}) as { name?: unknown; arguments?: unknown };
+    const def = typeof params.name === "string" ? TOOLS.get(params.name) : undefined;
+    if (!def) return fail(-32602, `Unknown tool: ${String(params.name)}`);
+    const parsed = z.object(def.schema).safeParse(params.arguments ?? {});
+    if (!parsed.success) return fail(-32602, `Invalid arguments: ${parsed.error.message}`);
+    try {
+      const text = await def.handler(parsed.data as Record<string, unknown>);
+      return reply({ result: { content: [{ type: "text", text }] } });
+    } catch (err) {
+      return fail(-32000, String(err));
+    }
+  }
+  // 其他请求/通知:无内容响应
+  return reply({}, 202);
 }
 
 // ---------- Streamable HTTP transport ----------
@@ -351,8 +452,17 @@ const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   }
   try {
     const body = await readBody(req);
+    const method = (body as { method?: string } | null)?.method;
     const sessionId =
       (req.headers["mcp-session-id"] as string | undefined) ?? url.searchParams.get("session_id") ?? undefined;
+
+    // 无 session 且非 initialize:2026-07-28 规范的无状态调用
+    // (跳过握手,直接 tools/list / tools/call),由 host 自带处理器应答
+    if (!sessionId && method !== "initialize") {
+      await handleStateless(body as Record<string, unknown> | undefined, res);
+      return;
+    }
+
     let session = sessionId ? sessions.get(sessionId) : undefined;
     if (!session) {
       const server = createMcpServer();

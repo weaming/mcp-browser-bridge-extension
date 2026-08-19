@@ -64,6 +64,8 @@ export type NativeRequest =
   | { t: "list-tabs"; seq: number }
   | { t: "set-target"; seq: number; tabId: number }
   | { t: "get-target"; seq: number }
+  | { t: "new-tab"; seq: number; url?: string }
+  | { t: "close-tab"; seq: number; tabId?: number }
   | { t: "get-port"; seq: number }
   | { t: "ping" };
 
@@ -87,6 +89,16 @@ export type NativeResponse =
       mode: "follow" | "fixed"; // follow=跟随当前激活标签页;fixed=固定目标
     }
   | { t: "port-info"; seq: number; port: number }
+  | {
+      t: "new-tab-result";
+      seq: number;
+      ok: boolean;
+      tabId?: number;
+      title?: string;
+      url?: string;
+      message?: string;
+    }
+  | { t: "close-tab-result"; seq: number; ok: boolean; message?: string }
   | { t: "pong" }
   | { t: "error"; seq: number; message: string };
 

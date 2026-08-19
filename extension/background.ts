@@ -176,6 +176,45 @@ async function handleNative(msg: NativeRequest): Promise<void> {
     } satisfies NativeResponse);
     return;
   }
+  if (msg.t === "new-tab") {
+    const tab = await chrome.tabs.create({ url: msg.url || undefined, active: true }).catch(() => null);
+    if (!tab) {
+      port?.postMessage({ t: "new-tab-result", seq: msg.seq, ok: false, message: "创建标签页失败" } satisfies NativeResponse);
+      return;
+    }
+    port?.postMessage({
+      t: "new-tab-result",
+      seq: msg.seq,
+      ok: true,
+      tabId: tab.id,
+      title: tab.title ?? "",
+      url: tab.url ?? "",
+    } satisfies NativeResponse);
+    return;
+  }
+  if (msg.t === "close-tab") {
+    const tabId = msg.tabId ?? (await resolveTargetTabId());
+    if (tabId === null) {
+      port?.postMessage({
+        t: "close-tab-result",
+        seq: msg.seq,
+        ok: false,
+        message: "没有可关闭的标签页",
+      } satisfies NativeResponse);
+      return;
+    }
+    const ok = await chrome.tabs
+      .remove(tabId)
+      .then(() => true)
+      .catch(() => false);
+    port?.postMessage({
+      t: "close-tab-result",
+      seq: msg.seq,
+      ok,
+      ...(ok ? {} : { message: "标签页不存在或无法关闭" }),
+    } satisfies NativeResponse);
+    return;
+  }
   const targetTabId = await resolveTargetTabId();
   if (targetTabId === null) {
     port?.postMessage({

@@ -68,6 +68,8 @@ url = "http://127.0.0.1:1234/mcp"
 | `browser_control_status` | — | 查询控制目标与连接状态 |
 | `browser_list_tabs` | — | 列出所有标签页 |
 | `browser_use_tab` | `tabId`(-1 回跟随) | 固定/切换控制目标 |
+| `browser_new_tab` | `url?` | 新建标签页并立即跳转(缺省空白页) |
+| `browser_close_tab` | `tabId?` | 关闭标签页(缺省关受控页,自动回跟随) |
 | `browser_snapshot` | — | 可交互元素快照(ref 编号+坐标) |
 | `browser_click` | `ref`, `button?` | 点击 |
 | `browser_type` | `ref`, `text`, `clear?` | 输入(兼容 React 受控输入) |

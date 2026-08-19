@@ -145,4 +145,17 @@ describe("MCP protocol", () => {
     expect(text).toContain("跟随模式");
     expect(text).toContain("Mock Page");
   });
+
+  test("browser_new_tab 新建标签页", async () => {
+    const resp = await mcp("tools/call", { name: "browser_new_tab", arguments: { url: "https://example.com" } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toContain("已打开新标签页");
+    expect(text).toContain("example.com");
+  });
+
+  test("browser_close_tab 关闭标签页", async () => {
+    const resp = await mcp("tools/call", { name: "browser_close_tab", arguments: {} });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toBe("已关闭");
+  });
 });
