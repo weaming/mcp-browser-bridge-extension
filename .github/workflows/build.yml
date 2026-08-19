@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write # 创建 Release / 生成 release notes 需要
+
 jobs:
   build:
     runs-on: ubuntu-latest
