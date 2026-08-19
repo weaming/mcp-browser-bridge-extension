@@ -1,0 +1,419 @@
+// browser-bridge host:唯一进程,两个角色:
+// 1. native messaging host(stdin/stdout 帧协议)—— 与 Chrome 扩展通信
+// 2. MCP server(Streamable HTTP,127.0.0.1:8790)—— 对 AI/程序暴露浏览器控制工具
+// 工具调用 → 帧请求 → 扩展执行 → 结果转 MCP 响应。
+// BROWSER_BRIDGE_MOCK=1 时帧请求由内部模拟应答(无扩展也能测 MCP API)。
+
+import { randomUUID } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { z } from "zod";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { encodeFrame, FrameReader } from "./native-protocol";
+import { actionFromArgs, PRESS_KEYS, SCROLL_DIRS, BUTTONS } from "../shared/actions";
+import type { NativeRequest, NativeResponse, Snapshot } from "../shared/messages";
+
+const START_PORT = Number(process.env.BROWSER_BRIDGE_PORT ?? 1234);
+const PORT_FILE = join(homedir(), ".browser-bridge", "port");
+const MOCK = process.env.BROWSER_BRIDGE_MOCK === "1";
+let port = START_PORT; // 实际监听端口,由下方端口探测决定
+
+// ---------- native messaging 层(与扩展通信) ----------
+
+const writer = Bun.stdout.writer();
+let seq = 0;
+
+interface Pending {
+  resolve: (m: NativeResponse) => void;
+  reject: (e: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const pending = new Map<number, Pending>();
+
+type FrameRequest = Extract<NativeRequest, { seq: number }>;
+
+function sendToExtension(msg: FrameRequest, timeoutMs = 10_000): Promise<NativeResponse> {
+  if (MOCK) return mockRespond(msg);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(msg.seq);
+      reject(new Error("扩展无响应(超时)"));
+    }, timeoutMs);
+    pending.set(msg.seq, { resolve, reject, timer });
+    writer.write(encodeFrame(msg));
+    writer.flush();
+  });
+}
+
+// mock 模式:模拟扩展的应答,便于无 Chrome 测试 MCP API
+function mockRespond(msg: FrameRequest): Promise<NativeResponse> {
+  const snap: Snapshot = {
+    url: "https://example.com/mock",
+    title: "Mock Page",
+    ts: 0,
+    scroll: { x: 0, y: 0, vh: 800, vw: 1200 },
+    nodes: [
+      { ref: 1, tag: "BUTTON", text: "登录", visible: true, rect: { x: 10, y: 10, w: 80, h: 32 } },
+      { ref: 2, tag: "INPUT", type: "text", text: "搜索", visible: true, rect: { x: 10, y: 50, w: 200, h: 30 } },
+    ],
+    truncated: false,
+  };
+  if (msg.t === "snapshot") {
+    return Promise.resolve({ t: "snapshot", seq: msg.seq, url: snap.url, title: snap.title, snapshot: snap });
+  }
+  if (msg.t === "list-tabs") {
+    return Promise.resolve({
+      t: "tabs",
+      seq: msg.seq,
+      tabs: [
+        { id: 1, title: "Mock Page", url: "https://example.com/mock", active: true },
+        { id: 2, title: "另一个标签", url: "https://example.org", active: false },
+      ],
+    });
+  }
+  if (msg.t === "set-target") {
+    return Promise.resolve({ t: "set-target-result", seq: msg.seq, ok: true, message: "Mock Page" });
+  }
+  if (msg.t === "get-target") {
+    return Promise.resolve({
+      t: "target-info",
+      seq: msg.seq,
+      target: { tabId: 1, title: "Mock Page", url: "https://example.com/mock" },
+      connected: true,
+      mode: "follow",
+    });
+  }
+  if (msg.t === "get-port") {
+    return Promise.resolve({ t: "port-info", seq: msg.seq, port: START_PORT });
+  }
+  return Promise.resolve({ t: "execute-result", seq: msg.seq, ok: true });
+}
+
+(async () => {
+  if (MOCK) return;
+  const reader = new FrameReader(process.stdin);
+  try {
+    for await (const frame of reader.frames()) {
+      // 单帧解析/处理错误不影响后续帧
+      try {
+        // 扩展回的是 NativeResponse;ping/get-port 是扩展发起的查询
+        const msg = JSON.parse(frame.subarray(4).toString("utf8")) as
+          | NativeResponse
+          | { t: "ping" }
+          | { t: "get-port"; seq: number };
+        if (msg.t === "ping") {
+          writer.write(encodeFrame({ t: "pong" }));
+          writer.flush();
+          continue;
+        }
+        if (msg.t === "get-port") {
+          writer.write(encodeFrame({ t: "port-info", seq: msg.seq, port }));
+          writer.flush();
+          continue;
+        }
+        if ("seq" in msg && pending.has(msg.seq)) {
+          const w = pending.get(msg.seq)!;
+          pending.delete(msg.seq);
+          clearTimeout(w.timer);
+          if (msg.t === "error") w.reject(new Error(msg.message));
+          else w.resolve(msg);
+        } else if (msg.t === "error") {
+          console.error(`extension error: ${msg.message}`);
+        }
+      } catch (err) {
+        console.error(`bad frame skipped: ${String(err)}`);
+      }
+    }
+  } catch (err) {
+    console.error(`native stream error: ${String(err)}`);
+  }
+  // stdin EOF:扩展断开,拒绝所有未决请求;延迟退出防僵尸(Chrome 正常会 SIGTERM)
+  for (const [, w] of pending) {
+    clearTimeout(w.timer);
+    w.reject(new Error("扩展已断开"));
+  }
+  pending.clear();
+  console.error("native messaging channel closed, exiting in 30s if not killed");
+  setTimeout(() => process.exit(0), 30_000).unref?.();
+})();
+
+// ---------- 工具实现 ----------
+
+function snapshotText(s: Snapshot): string {
+  const lines = [`URL: ${s.url}`, `标题: ${s.title}`];
+  for (const n of s.nodes) {
+    let line = `[${n.ref}] <${n.tag}`;
+    if (n.type) line += ` type=${n.type}`;
+    line += ">";
+    if (n.text) line += ` "${n.text}"`;
+    if (n.href) line += ` href=${n.href}`;
+    if (n.name) line += ` name=${n.name}`;
+    if (n.value) line += ` value="${n.value}"`;
+    if (n.checked) line += " checked";
+    if (n.disabled) line += " disabled";
+    if (n.rect) line += ` @(${n.rect.x},${n.rect.y} ${n.rect.w}x${n.rect.h})`;
+    if (!n.visible) line += " (视口外)";
+    if (n.opts?.length) line += ` 选项:${n.opts.join("|")}`;
+    lines.push(line);
+  }
+  if (s.truncated) lines.push("(节点过多已截断,只显示前部分)");
+  return lines.join("\n");
+}
+
+const okText = (s: string) => ({ content: [{ type: "text" as const, text: s }] });
+
+async function executeAction(kind: Parameters<typeof actionFromArgs>[0], args: Record<string, unknown>) {
+  const action = actionFromArgs(kind, args);
+  if (!("action" in action)) return okText(`参数错误: ${action.error}`);
+  const resp = await sendToExtension({ t: "execute", seq: ++seq, action });
+  if (resp.t === "execute-result") {
+    if (resp.ok) return okText("ok");
+    return okText(`失败: ${resp.code ?? "unknown"}${resp.detail ? ` — ${resp.detail}` : ""}`);
+  }
+  if (resp.t === "error") return okText(`失败: ${resp.message}`);
+  return okText("失败: 扩展无响应");
+}
+
+// ---------- MCP server ----------
+
+// SDK 的 Server 实例只能 connect 一次,每个 MCP session 创建独立实例。
+function createMcpServer(): McpServer {
+  const mcp = new McpServer({ name: "browser-bridge", version: "0.1.0" });
+
+  mcp.tool("browser_snapshot", "获取当前受控页面的可交互元素快照(带 ref 编号与坐标),AI 据此决定后续操作", async () => {
+  const resp = await sendToExtension({ t: "snapshot", seq: ++seq });
+  if (resp.t === "snapshot") return okText(snapshotText(resp.snapshot));
+  if (resp.t === "error") return okText(`快照失败: ${resp.message}`);
+  return okText("快照失败: 扩展无响应");
+});
+
+mcp.tool(
+  "browser_click",
+  "点击快照中 ref 编号的元素",
+  { ref: z.number().int().positive(), button: z.enum(BUTTONS).optional() },
+  async (args) => executeAction("click", args),
+);
+
+mcp.tool(
+  "browser_type",
+  "向 ref 输入框输入文本(clear=true 先清空)",
+  { ref: z.number().int().positive(), text: z.string(), clear: z.boolean().optional() },
+  async (args) => executeAction("type", args),
+);
+
+mcp.tool("browser_press", "按键盘键(作用于当前聚焦元素)", { key: z.enum(PRESS_KEYS) }, async (args) =>
+  executeAction("press", args),
+);
+
+mcp.tool(
+  "browser_select",
+  "设置 ref 下拉框的选项值",
+  { ref: z.number().int().positive(), value: z.string() },
+  async (args) => executeAction("select", args),
+);
+
+mcp.tool(
+  "browser_scroll",
+  "滚动视口(dir 方向,amount 像素;带 ref 时滚到该元素)",
+  { dir: z.enum(SCROLL_DIRS), amount: z.number().int().optional(), ref: z.number().int().positive().optional() },
+  async (args) => executeAction("scroll", args),
+);
+
+mcp.tool("browser_hover", "悬停 ref 元素(触发 hover 菜单)", { ref: z.number().int().positive() }, async (args) =>
+  executeAction("hover", args),
+);
+
+mcp.tool("browser_goto", "跳转到指定 URL", { url: z.string() }, async (args) => executeAction("goto", args));
+
+mcp.tool("browser_back", "浏览器后退", async () => executeAction("back", {}));
+
+mcp.tool("browser_refresh", "刷新页面", async () => executeAction("refresh", {}));
+
+  mcp.tool("browser_wait", "等待页面稳定(ms 毫秒,默认 800)", { ms: z.number().int().optional() }, async (args) =>
+    executeAction("wait", args),
+  );
+
+  mcp.tool("browser_list_tabs", "列出所有打开的标签页(id/标题/URL),选择控制目标用", async () => {
+    const resp = await sendToExtension({ t: "list-tabs", seq: ++seq });
+    if (resp.t === "tabs") {
+      const lines = resp.tabs.map(
+        (t) => `[${t.id}] ${t.title} — ${t.url}${t.active ? " (当前激活)" : ""}`,
+      );
+      if (lines.length === 0) return okText("没有可控制的标签页(需 http/https 页面)");
+      return okText(lines.join("\n"));
+    }
+    if (resp.t === "error") return okText(`失败: ${resp.message}`);
+    return okText("失败: 扩展无响应");
+  });
+
+  mcp.tool("browser_control_status", "查询当前控制目标标签页与桥连接状态", async () => {
+    const resp = await sendToExtension({ t: "get-target", seq: ++seq });
+    if (resp.t === "target-info") {
+      if (!resp.connected) return okText("桥未连接(扩展未加载或 host 未启动)");
+      if (!resp.target) {
+        return okText(
+          "没有可控制的标签页(当前激活页需是 http/https)。用 browser_list_tabs 查看,browser_use_tab 固定目标。",
+        );
+      }
+      if (resp.mode === "follow") {
+        return okText(
+          `跟随模式:控制你当前激活的标签页(当前: [${resp.target.tabId}] ${resp.target.title} — ${resp.target.url})。切换浏览器标签页即切换控制目标。`,
+        );
+      }
+      return okText(`已固定控制: [${resp.target.tabId}] ${resp.target.title} — ${resp.target.url}`);
+    }
+    if (resp.t === "error") return okText(`失败: ${resp.message}`);
+    return okText("失败: 扩展无响应");
+  });
+
+  mcp.tool(
+    "browser_use_tab",
+    "选择控制目标标签页(之后所有操作作用于该页);tabId=-1 表示取消固定,回到跟随模式(控制当前激活标签页)",
+    { tabId: z.number().int().refine((v) => v === -1 || v >= 1, "tabId 必须 >=1,或 -1 回到跟随模式") },
+    async (args) => {
+    const resp = await sendToExtension({ t: "set-target", seq: ++seq, tabId: args.tabId });
+    if (resp.t === "set-target-result") {
+      if (resp.ok) return okText(`已切换目标: ${resp.message ?? `tab ${args.tabId}`}`);
+      return okText(`失败: ${resp.message ?? "未知"}`);
+    }
+    if (resp.t === "error") return okText(`失败: ${resp.message}`);
+    return okText("失败: 扩展无响应");
+  });
+
+  return mcp;
+}
+
+// ---------- Streamable HTTP transport ----------
+
+interface McpSession {
+  transport: StreamableHTTPServerTransport;
+  server: McpServer;
+  lastUsed: number;
+}
+
+const sessions = new Map<string, McpSession>();
+
+// 会话过期清理:1 小时未活动的 session 关闭,防长跑泄漏
+const SESSION_TTL_MS = 3600_000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [sid, s] of sessions) {
+    if (now - s.lastUsed > SESSION_TTL_MS) {
+      s.transport.close();
+      s.server.close();
+      sessions.delete(sid);
+    }
+  }
+}, 300_000).unref?.();
+
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+function readBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    req.on("data", (c: Buffer) => {
+      total += c.length;
+      if (total > MAX_BODY_BYTES) {
+        reject(new Error(`request body too large (>${MAX_BODY_BYTES})`));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8");
+      try {
+        resolve(text ? JSON.parse(text) : undefined);
+      } catch (err) {
+        reject(new Error(`bad json body: ${String(err)}`));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+// ---------- 端口自愈监听 ----------
+// 从初始端口(默认 1234)开始探测,被占则 +1,最多试 20 个;
+// 实际端口写入 ~/.browser-bridge/port 供 MCP 客户端发现。
+
+const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+  const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+  if (url.pathname !== "/mcp") {
+    res.statusCode = 404;
+    res.end("not found");
+    return;
+  }
+  try {
+    const body = await readBody(req);
+    const sessionId =
+      (req.headers["mcp-session-id"] as string | undefined) ?? url.searchParams.get("session_id") ?? undefined;
+    let session = sessionId ? sessions.get(sessionId) : undefined;
+    if (!session) {
+      const server = createMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        // sessionId 在收到 initialize 请求时生成,通过回调注册
+        onsessioninitialized: (sid) => {
+          sessions.set(sid, { transport, server, lastUsed: Date.now() });
+          transport.onclose = () => sessions.delete(sid);
+        },
+      });
+      await server.connect(transport);
+      session = { transport, server, lastUsed: Date.now() };
+    }
+    session.lastUsed = Date.now();
+    await session.transport.handleRequest(req, res, body);
+  } catch (err) {
+    console.error(`mcp http error: ${String(err)}`);
+    if (!res.headersSent) {
+      res.statusCode = 500;
+      res.end("internal error");
+    }
+  }
+});
+
+// node http 的 EADDRINUSE 是异步 error 事件,不是同步 throw
+function tryListen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const onError = (err: NodeJS.ErrnoException) => {
+      resolve(false);
+    };
+    http.once("error", onError);
+    http.listen(port, "127.0.0.1", () => {
+      http.removeListener("error", onError);
+      resolve(true);
+    });
+  });
+}
+
+for (let i = 0; i < 20; i++) {
+  if (await tryListen(START_PORT + i)) {
+    port = START_PORT + i;
+    break;
+  }
+}
+if (!http.listening) {
+  console.error(`无法绑定端口 ${START_PORT}..${START_PORT + 19},退出`);
+  process.exit(1);
+}
+
+mkdirSync(dirname(PORT_FILE), { recursive: true });
+Bun.write(PORT_FILE, String(port));
+console.error(`browser-bridge MCP server listening on http://127.0.0.1:${port}/mcp (port file: ${PORT_FILE})`);
+
+// ---------- 崩溃兜底:任何未捕获异常都记录而非退出 ----------
+
+process.on("uncaughtException", (err) => {
+  console.error(`uncaught exception (ignored): ${err.stack ?? String(err)}`);
+});
+process.on("unhandledRejection", (err) => {
+  console.error(`unhandled rejection (ignored): ${String(err)}`);
+});
+
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGINT", () => process.exit(0));
