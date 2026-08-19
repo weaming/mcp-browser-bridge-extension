@@ -56,6 +56,25 @@ async function resolveTargetTabId(): Promise<number | null> {
   return null;
 }
 
+// 每个标签页只动态注入一次 content script(避免多实例竞争);
+// 页面导航(loading)或关闭时清除记录,下次操作重新注入
+const injectedTabs = new Set<number>();
+
+async function ensureInjected(tabId: number): Promise<void> {
+  if (injectedTabs.has(tabId)) return;
+  await chrome.scripting
+    .executeScript({ target: { tabId }, files: ["content-script.js"] })
+    .catch(() => {});
+  injectedTabs.add(tabId);
+}
+
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading") injectedTabs.delete(tabId);
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  injectedTabs.delete(tabId);
+});
+
 // 设置控制目标:tabId=-1 取消固定(回跟随模式);否则固定并激活/注入。
 // 返回错误信息(null=成功)。popup 与 host 帧两个入口共用。
 async function setControlledTab(tabId: number): Promise<string | null> {
@@ -75,10 +94,7 @@ async function setControlledTab(tabId: number): Promise<string | null> {
   if (tab.windowId !== undefined) {
     await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
   }
-  // 已打开的页面不会自动注入 content script,这里动态注入(幂等)
-  await chrome.scripting
-    .executeScript({ target: { tabId }, files: ["content-script.js"] })
-    .catch(() => {});
+  await ensureInjected(tabId);
   return null;
 }
 
@@ -192,6 +208,45 @@ async function handleNative(msg: NativeRequest): Promise<void> {
     } satisfies NativeResponse);
     return;
   }
+  if (msg.t === "activate-tab") {
+    const ok = await chrome.tabs
+      .update(msg.tabId, { active: true })
+      .then(() => true)
+      .catch(() => false);
+    port?.postMessage({
+      t: "activate-tab-result",
+      seq: msg.seq,
+      ok,
+      ...(ok ? {} : { message: "标签页不存在" }),
+    } satisfies NativeResponse);
+    return;
+  }
+  if (msg.t === "duplicate-tab") {
+    const tabId = msg.tabId ?? (await resolveTargetTabId());
+    const tab = tabId === null ? null : await chrome.tabs.duplicate(tabId).catch(() => null);
+    if (!tab) {
+      port?.postMessage({ t: "duplicate-tab-result", seq: msg.seq, ok: false, message: "复制标签页失败" } satisfies NativeResponse);
+      return;
+    }
+    port?.postMessage({ t: "duplicate-tab-result", seq: msg.seq, ok: true, tabId: tab.id } satisfies NativeResponse);
+    return;
+  }
+  if (msg.t === "pin-tab") {
+    const tabId = msg.tabId ?? (await resolveTargetTabId());
+    const ok = tabId === null ? false : await chrome.tabs.update(tabId, { pinned: msg.pinned }).then(() => true).catch(() => false);
+    port?.postMessage({
+      t: "pin-tab-result",
+      seq: msg.seq,
+      ok,
+      ...(ok ? {} : { message: "标签页不存在" }),
+    } satisfies NativeResponse);
+    return;
+  }
+  if (msg.t === "screenshot") {
+    const result = await captureScreenshot();
+    port?.postMessage({ t: "screenshot-result", seq: msg.seq, ...result } satisfies NativeResponse);
+    return;
+  }
   if (msg.t === "close-tab") {
     const tabId = msg.tabId ?? (await resolveTargetTabId());
     if (tabId === null) {
@@ -224,10 +279,7 @@ async function handleNative(msg: NativeRequest): Promise<void> {
     } satisfies NativeResponse);
     return;
   }
-  // 确保 content script 已注入(幂等);跟随模式首次遇到旧页面时靠这里注入
-  await chrome.scripting
-    .executeScript({ target: { tabId: targetTabId }, files: ["content-script.js"] })
-    .catch(() => {});
+  await ensureInjected(targetTabId);
   let contentResp: ContentResponse | null = null;
   if (msg.t === "snapshot") {
     const req: ContentRequest = { kind: "snapshot", seq: msg.seq };
@@ -263,6 +315,36 @@ async function handleNative(msg: NativeRequest): Promise<void> {
       code: contentResp.code,
       detail: contentResp.detail,
     } satisfies NativeResponse);
+  }
+}
+
+// ---------- 截图(captureVisibleTab → OffscreenCanvas 压缩 JPEG) ----------
+
+async function captureScreenshot(): Promise<{ ok: boolean; dataUrl?: string; message?: string }> {
+  const tabId = await resolveTargetTabId();
+  if (tabId === null) return { ok: false, message: "没有可控制的标签页" };
+  // 截图需要目标页处于激活状态
+  await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+  const png = await (chrome.tabs.captureVisibleTab as unknown as (opts: { format: string }) => Promise<string>)({ format: "png" }).catch(() => null);
+  if (!png) return { ok: false, message: "截图失败(页面不可见?)" };
+  try {
+    // 压缩:缩放宽 1280 + JPEG 0.7,控制在 1MB 帧上限内
+    const blob = await (await fetch(png)).blob();
+    const bitmap = await createImageBitmap(blob);
+    const scale = Math.min(1, 1280 / bitmap.width);
+    const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const out = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.7 });
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result as string);
+      fr.onerror = () => reject(new Error("blob 转 dataURL 失败"));
+      fr.readAsDataURL(out);
+    });
+    return { ok: true, dataUrl };
+  } catch (err) {
+    return { ok: false, message: `截图压缩失败: ${String(err)}` };
   }
 }
 

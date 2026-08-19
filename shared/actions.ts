@@ -2,12 +2,15 @@
 
 export const ACTION_NAMES = [
   "click", "type", "press", "select", "scroll", "hover",
-  "goto", "back", "refresh", "wait",
+  "goto", "back", "refresh", "wait", "dblclick", "highlight", "drag",
 ] as const;
 export type ActionName = (typeof ACTION_NAMES)[number];
 
 export const PRESS_KEYS = ["Enter", "Escape", "Tab", "ArrowDown", "ArrowUp"] as const;
 export type PressKey = (typeof PRESS_KEYS)[number];
+
+export const MODIFIERS = ["ctrl", "shift", "alt", "meta"] as const;
+export type Modifier = (typeof MODIFIERS)[number];
 
 export const SCROLL_DIRS = ["up", "down", "left", "right"] as const;
 export type ScrollDir = (typeof SCROLL_DIRS)[number];
@@ -18,10 +21,13 @@ export type ClickButton = (typeof BUTTONS)[number];
 export type Action =
   | { action: "click"; ref: number; button?: ClickButton }
   | { action: "type"; ref: number; text: string; clear?: boolean }
-  | { action: "press"; key: PressKey }
+  | { action: "press"; key: PressKey; modifiers?: Modifier[] }
   | { action: "select"; ref: number; value: string }
   | { action: "scroll"; ref?: number; dir: ScrollDir; amount?: number }
   | { action: "hover"; ref: number }
+  | { action: "dblclick"; ref: number }
+  | { action: "highlight"; ref: number }
+  | { action: "drag"; fromRef: number; toRef: number }
   | { action: "goto"; url: string }
   | { action: "back" }
   | { action: "refresh" }
@@ -59,6 +65,16 @@ export function actionFromArgs(kind: ActionName, args: Record<string, unknown>):
       if (!key || !(PRESS_KEYS as readonly string[]).includes(key)) {
         return { ok: false, error: "press key 非法" };
       }
+      const modifiers = args.modifiers;
+      if (modifiers !== undefined) {
+        if (
+          !Array.isArray(modifiers) ||
+          !modifiers.every((m) => (MODIFIERS as readonly string[]).includes(m as string))
+        ) {
+          return { ok: false, error: "press modifiers 非法" };
+        }
+        return { action: "press", key, modifiers: modifiers as Modifier[] };
+      }
       return { action: "press", key };
     }
     case "select": {
@@ -79,6 +95,20 @@ export function actionFromArgs(kind: ActionName, args: Record<string, unknown>):
     case "hover": {
       if (!isInt(args.ref)) return { ok: false, error: "hover 需要整数 ref" };
       return { action: "hover", ref: args.ref };
+    }
+    case "dblclick": {
+      if (!isInt(args.ref)) return { ok: false, error: "dblclick 需要整数 ref" };
+      return { action: "dblclick", ref: args.ref };
+    }
+    case "highlight": {
+      if (!isInt(args.ref)) return { ok: false, error: "highlight 需要整数 ref" };
+      return { action: "highlight", ref: args.ref };
+    }
+    case "drag": {
+      if (!isInt(args.fromRef) || !isInt(args.toRef)) {
+        return { ok: false, error: "drag 需要 fromRef 和 toRef" };
+      }
+      return { action: "drag", fromRef: args.fromRef, toRef: args.toRef };
     }
     case "goto": {
       if (typeof args.url !== "string" || !/^https?:\/\//.test(args.url)) {

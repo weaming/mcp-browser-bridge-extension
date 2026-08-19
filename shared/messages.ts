@@ -66,6 +66,10 @@ export type NativeRequest =
   | { t: "get-target"; seq: number }
   | { t: "new-tab"; seq: number; url?: string }
   | { t: "close-tab"; seq: number; tabId?: number }
+  | { t: "activate-tab"; seq: number; tabId: number }
+  | { t: "duplicate-tab"; seq: number; tabId?: number }
+  | { t: "pin-tab"; seq: number; tabId?: number; pinned: boolean }
+  | { t: "screenshot"; seq: number }
   | { t: "get-port"; seq: number }
   | { t: "ping" };
 
@@ -99,6 +103,10 @@ export type NativeResponse =
       message?: string;
     }
   | { t: "close-tab-result"; seq: number; ok: boolean; message?: string }
+  | { t: "activate-tab-result"; seq: number; ok: boolean; message?: string }
+  | { t: "duplicate-tab-result"; seq: number; ok: boolean; tabId?: number; message?: string }
+  | { t: "pin-tab-result"; seq: number; ok: boolean; message?: string }
+  | { t: "screenshot-result"; seq: number; ok: boolean; dataUrl?: string; message?: string }
   | { t: "pong" }
   | { t: "error"; seq: number; message: string };
 

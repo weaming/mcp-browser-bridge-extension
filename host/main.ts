@@ -14,7 +14,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { encodeFrame, FrameReader } from "./native-protocol";
-import { actionFromArgs, PRESS_KEYS, SCROLL_DIRS, BUTTONS } from "../shared/actions";
+import { actionFromArgs, PRESS_KEYS, SCROLL_DIRS, BUTTONS, MODIFIERS } from "../shared/actions";
 import type { NativeRequest, NativeResponse, Snapshot } from "../shared/messages";
 
 const START_PORT = Number(process.env.BROWSER_BRIDGE_PORT ?? 1234);
@@ -104,6 +104,23 @@ function mockRespond(msg: FrameRequest): Promise<NativeResponse> {
   }
   if (msg.t === "close-tab") {
     return Promise.resolve({ t: "close-tab-result", seq: msg.seq, ok: true });
+  }
+  if (msg.t === "activate-tab") {
+    return Promise.resolve({ t: "activate-tab-result", seq: msg.seq, ok: true });
+  }
+  if (msg.t === "duplicate-tab") {
+    return Promise.resolve({ t: "duplicate-tab-result", seq: msg.seq, ok: true, tabId: 100 });
+  }
+  if (msg.t === "pin-tab") {
+    return Promise.resolve({ t: "pin-tab-result", seq: msg.seq, ok: true });
+  }
+  if (msg.t === "screenshot") {
+    return Promise.resolve({
+      t: "screenshot-result",
+      seq: msg.seq,
+      ok: true,
+      dataUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==", // mock 极小图片
+    });
   }
   return Promise.resolve({ t: "execute-result", seq: msg.seq, ok: true });
 }
@@ -288,6 +305,105 @@ tool("browser_close_tab", "关闭标签页(tabId 缺省关闭当前控制目标;
   });
   if (resp.t === "close-tab-result") {
     if (resp.ok) return "已关闭";
+    return `失败: ${resp.message ?? "未知"}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool("browser_screenshot", "截取当前控制页面的可见区域并返回图片(dataUrl),用于视觉理解复杂布局", {}, async () => {
+  const resp = await sendToExtension({ t: "screenshot", seq: ++seq });
+  if (resp.t === "screenshot-result") {
+    if (resp.ok) return `截图成功(dataUrl, ${resp.dataUrl?.length ?? 0} 字符)`;
+    return `失败: ${resp.message ?? "未知"}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool("browser_highlight", "高亮快照中 ref 的元素约 1 秒,让用户看到 AI 即将操作的位置", { ref: z.number().int().positive() }, async (args) =>
+  executeAction("highlight", args),
+);
+
+tool("browser_activate_tab", "激活(切换到前台)标签页给用户看,但不改变控制目标", { tabId: z.number().int().positive() }, async (args) => {
+  const resp = await sendToExtension({ t: "activate-tab", seq: ++seq, tabId: args.tabId as number });
+  if (resp.t === "activate-tab-result") {
+    if (resp.ok) return "已激活";
+    return `失败: ${resp.message ?? "未知"}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool("browser_dblclick", "双击快照中 ref 的元素", { ref: z.number().int().positive() }, async (args) =>
+  executeAction("dblclick", args),
+);
+
+tool("browser_key", "按键盘键(可带修饰键 ctrl/shift/alt/meta),作用于当前聚焦元素", { key: z.enum(PRESS_KEYS), modifiers: z.array(z.enum(MODIFIERS)).optional() }, async (args) =>
+  executeAction("press", args),
+);
+
+tool("browser_url", "查询当前控制页面的 URL 与标题(轻量,比 snapshot 省 token)", {}, async () => {
+  const resp = await sendToExtension({ t: "get-target", seq: ++seq });
+  if (resp.t === "target-info") {
+    if (!resp.connected) return "桥未连接(扩展未加载或 host 未启动)";
+    if (!resp.target) return "没有可控制的标签页";
+    return `${resp.target.url}\n${resp.target.title}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool(
+  "browser_form_fill",
+  "批量填写表单字段(fields: [{ref, text, clear?}],按序逐个输入)",
+  {
+    fields: z
+      .array(
+        z.object({
+          ref: z.number().int().positive(),
+          text: z.string(),
+          clear: z.boolean().optional(),
+        }),
+      )
+      .min(1),
+  },
+  async (args) => {
+    const results: string[] = [];
+    for (const f of (args.fields as { ref: number; text: string; clear?: boolean }[])) {
+      results.push(await executeAction("type", f));
+    }
+    return results.join("\n");
+  },
+);
+
+tool("browser_drag", "把 fromRef 元素拖拽到 toRef 元素(HTML5 拖拽)", { fromRef: z.number().int().positive(), toRef: z.number().int().positive() }, async (args) =>
+  executeAction("drag", args),
+);
+
+tool("browser_duplicate_tab", "复制标签页(tabId 缺省复制当前控制目标),返回新标签页 id", { tabId: z.number().int().positive().optional() }, async (args) => {
+  const resp = await sendToExtension({
+    t: "duplicate-tab",
+    seq: ++seq,
+    ...(typeof args.tabId === "number" ? { tabId: args.tabId } : {}),
+  });
+  if (resp.t === "duplicate-tab-result") {
+    if (resp.ok) return `已复制,新标签页 id: ${resp.tabId ?? "?"}`;
+    return `失败: ${resp.message ?? "未知"}`;
+  }
+  if (resp.t === "error") return `失败: ${resp.message}`;
+  return "失败: 扩展无响应";
+});
+
+tool("browser_pin_tab", "固定/取消固定标签页(tabId 缺省操作当前控制目标;默认固定)", { tabId: z.number().int().positive().optional(), pinned: z.boolean().optional() }, async (args) => {
+  const resp = await sendToExtension({
+    t: "pin-tab",
+    seq: ++seq,
+    pinned: args.pinned !== false,
+    ...(typeof args.tabId === "number" ? { tabId: args.tabId } : {}),
+  });
+  if (resp.t === "pin-tab-result") {
+    if (resp.ok) return args.pinned !== false ? "已固定" : "已取消固定";
     return `失败: ${resp.message ?? "未知"}`;
   }
   if (resp.t === "error") return `失败: ${resp.message}`;

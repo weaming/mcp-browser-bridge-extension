@@ -70,13 +70,22 @@ url = "http://127.0.0.1:1234/mcp"
 | `browser_use_tab` | `tabId`(-1 回跟随) | 固定/切换控制目标 |
 | `browser_new_tab` | `url?` | 新建标签页并立即跳转(缺省空白页) |
 | `browser_close_tab` | `tabId?` | 关闭标签页(缺省关受控页,自动回跟随) |
+| `browser_activate_tab` | `tabId` | 激活标签页给用户看,不改控制目标 |
+| `browser_duplicate_tab` | `tabId?` | 复制标签页(缺省复制受控页) |
+| `browser_pin_tab` | `tabId?`, `pinned?` | 固定/取消固定标签页 |
 | `browser_snapshot` | — | 可交互元素快照(ref 编号+坐标) |
+| `browser_screenshot` | — | 可视区截图(dataUrl,视觉理解复杂布局) |
+| `browser_url` | — | 查询当前控制页 URL 与标题(轻量) |
 | `browser_click` | `ref`, `button?` | 点击 |
+| `browser_dblclick` | `ref` | 双击 |
 | `browser_type` | `ref`, `text`, `clear?` | 输入(兼容 React 受控输入) |
-| `browser_press` | `key` | 按键(Enter/Escape/Tab/Arrow…) |
+| `browser_form_fill` | `fields[]` | 批量填写多个字段 |
+| `browser_press` / `browser_key` | `key`, `modifiers?` | 按键(支持 ctrl/shift/alt/meta) |
 | `browser_select` | `ref`, `value` | 下拉框 |
 | `browser_scroll` | `dir`, `amount?`, `ref?` | 滚动 |
 | `browser_hover` | `ref` | 悬停 |
+| `browser_highlight` | `ref` | 高亮元素 1s(用户可见 AI 操作位置) |
+| `browser_drag` | `fromRef`, `toRef` | HTML5 拖拽 |
 | `browser_goto` / `back` / `refresh` | `url` | 导航 |
 | `browser_wait` | `ms?` | 等待页面稳定 |
 

@@ -158,4 +158,63 @@ describe("MCP protocol", () => {
     const text = (resp.result as { content: { text: string }[] }).content[0].text;
     expect(text).toBe("已关闭");
   });
+
+  test("browser_screenshot 返回截图 dataUrl", async () => {
+    const resp = await mcp("tools/call", { name: "browser_screenshot", arguments: {} });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toContain("截图成功");
+    expect(text).toContain("dataUrl");
+  });
+
+  test("browser_highlight 高亮元素", async () => {
+    const resp = await mcp("tools/call", { name: "browser_highlight", arguments: { ref: 1 } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toBe("ok");
+  });
+
+  test("browser_activate_tab 激活标签页", async () => {
+    const resp = await mcp("tools/call", { name: "browser_activate_tab", arguments: { tabId: 2 } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toBe("已激活");
+  });
+
+  test("browser_dblclick 双击", async () => {
+    const resp = await mcp("tools/call", { name: "browser_dblclick", arguments: { ref: 1 } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toBe("ok");
+  });
+
+  test("browser_key 带修饰键按键", async () => {
+    const resp = await mcp("tools/call", { name: "browser_key", arguments: { key: "Enter", modifiers: ["ctrl"] } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toBe("ok");
+  });
+
+  test("browser_url 查询当前 URL", async () => {
+    const resp = await mcp("tools/call", { name: "browser_url", arguments: {} });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toContain("example.com/mock");
+  });
+
+  test("browser_form_fill 批量填表", async () => {
+    const resp = await mcp("tools/call", {
+      name: "browser_form_fill",
+      arguments: { fields: [{ ref: 1, text: "a" }, { ref: 2, text: "b", clear: true }] },
+    });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toContain("ok");
+  });
+
+  test("browser_drag 拖拽", async () => {
+    const resp = await mcp("tools/call", { name: "browser_drag", arguments: { fromRef: 1, toRef: 2 } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toBe("ok");
+  });
+
+  test("browser_duplicate_tab / browser_pin_tab", async () => {
+    const dup = await mcp("tools/call", { name: "browser_duplicate_tab", arguments: {} });
+    expect((dup.result as { content: { text: string }[] }).content[0].text).toContain("已复制");
+    const pin = await mcp("tools/call", { name: "browser_pin_tab", arguments: {} });
+    expect((pin.result as { content: { text: string }[] }).content[0].text).toBe("已固定");
+  });
 });
