@@ -364,7 +364,16 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 const KEEPALIVE_ALARM = "keepalive";
 
-chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+// MV3 SW 是懒加载的:重载后 SW 不运行,alarm 也不会被注册,
+// 导致 host 永不自动启动。onInstalled(重载视为 update)会唤醒 SW,确保 alarm 重建。
+function ensureKeepalive(): void {
+  chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
+}
+
+chrome.runtime.onInstalled.addListener(ensureKeepalive);
+chrome.runtime.onStartup.addListener(ensureKeepalive);
+ensureKeepalive();
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
   // 唤醒后确保 host 连接;连不上(host 被杀)则重连
