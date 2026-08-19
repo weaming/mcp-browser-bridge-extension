@@ -1,74 +1,133 @@
-# browser-bridge
+# Browser Bridge
 
-**AI | 程序 ↔ 浏览器 控制桥**:把浏览器变成 MCP 工具集。任意 MCP 客户端(AI 程序)通过 MCP 协议调用 `browser_snapshot`/`browser_click`/`browser_type` 等工具,指令经 native messaging 转发给 Chrome 扩展在页面上执行。
+**AI ↔ 浏览器控制桥**:把浏览器变成 MCP 工具集。任何 MCP 客户端(AI 程序)通过标准 MCP 协议调用 `browser_snapshot` / `browser_click` / `browser_type` 等工具,在真实浏览器里操作网页。
 
-## 架构
+- 支持任意 MCP 客户端:Claude、codex、自定义 agent、curl
+- 默认**跟随模式**:AI 自动控制你当前激活的标签页,零配置
+- 真实浏览器,非 headless:登录态、验证码(提示你手动)、反爬特征自然
 
-```
-任意 MCP 客户端(Claude / codex / 自定义 agent ...)
-   │ MCP (Streamable HTTP, 127.0.0.1:8790/mcp)
-browser-bridge host(单个进程 = MCP 协议 ↔ 帧协议的翻译器)
-   │ native messaging 帧
-Chrome 扩展 (MV3)
-   ├─ background : 转发 host 请求到受控标签页
-   └─ content script : 抓快照(ref 编号) / 执行指令
-```
+## 快速开始
 
-- 扩展无法直接监听端口提供 MCP(MV3 无 TCP 能力),native host 是必需通道
-- host 一个进程同时担任:原生消息 host + MCP server
-- `BROWSER_BRIDGE_MOCK=1` 时帧请求内部模拟应答,无 Chrome 也可测试 MCP API
+### 1. 下载
 
-## MCP 工具
+从 [Releases](https://github.com/weaming/browser-bridge/releases) 下载**一个**压缩包:
 
-| 工具 | 参数 | 说明 |
-|---|---|---|
-| `browser_snapshot` | — | 可交互元素快照(带 ref 编号与坐标) |
-| `browser_click` | `ref`, `button?` | 点击元素 |
-| `browser_type` | `ref`, `text`, `clear?` | 输入文本(兼容 React 受控输入) |
-| `browser_press` | `key`(Enter/Escape/Tab/ArrowDown/ArrowUp) | 按键 |
-| `browser_select` | `ref`, `value` | 设置下拉框 |
-| `browser_scroll` | `dir`, `amount?`, `ref?` | 滚动视口/元素 |
-| `browser_hover` | `ref` | 悬停(触发 hover 菜单) |
-| `browser_goto` | `url`(仅 http/https) | 跳转 |
-| `browser_back` / `browser_refresh` | — | 后退 / 刷新 |
-| `browser_wait` | `ms?`(默认 800) | 等待页面稳定 |
+- `browser-bridge-<platform>-<arch>.zip` — 按你机器的平台选
 
-AI 自行编排:snapshot → 决策 → 执行 → 再 snapshot,直到任务完成。
+解压到任意目录(下文用 `<DIR>` 表示),目录内含 `browser-bridge/`(扩展)、`browser-bridge-host`、`install-host.sh`(Windows 为 `install-host.ps1`)。
 
-## 构建与安装
+### 2. 加载扩展
+
+1. 打开 `chrome://extensions`
+2. 右上角打开**开发者模式**
+3. 点「加载已解压的扩展程序」,选择解压后的 `browser-bridge/` 目录
+
+### 3. 安装 host
+
+macOS / Linux:
 
 ```bash
-bun install
-bun run build          # 编译 host + 打包扩展到 extension-dist/
-bun run install-host <扩展ID>  # 注册 native messaging host(扩展 ID 在 chrome://extensions 复制)
+cd <DIR>
+./install-host.sh         # Windows(PowerShell): .\install-host.ps1
 ```
 
-Chrome 打开 `chrome://extensions`,开发者模式 → 加载已解压的扩展 → 选择 `extension-dist/`。
+运行后会列出检测到的浏览器,回车安装到全部,或输入序号选特定浏览器;也支持参数直接指定:
 
-使用:在目标标签页点扩展图标 →「🎯 控制此标签页」。之后任意 MCP 客户端连接即可控制该页面。
+```bash
+./install-host.sh --all      # 安装到全部浏览器
+./install-host.sh --chrome   # 只装 Chrome(--chromium / --edge 同理)
+```
 
-## 接入 MCP 客户端
+扩展 ID 已内置固定,无需手动填写;若你的扩展 ID 不同,可追加传参:`./install-host.sh <你的扩展ID>`。
 
-MCP server 地址:初始 `http://127.0.0.1:1234/mcp`(Streamable HTTP)。端口被占时自动 +1 探测,实际端口写在 `~/.browser-bridge/port`(客户端读此文件发现端口)。
+> 若浏览器已打开,安装后请完全退出并重启浏览器。
+
+### 4. 使用
+
+任意 MCP 客户端连接:
+
+```
+MCP server: http://127.0.0.1:1234/mcp
+```
+
+端口被占时自动 +1,实际端口看扩展 popup(已连接 · MCP端口 xxxx)或 `~/.browser-bridge/port`。
 
 codex 配置示例(`~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.browser]
-url = "http://127.0.0.1:8790/mcp"
+url = "http://127.0.0.1:1234/mcp"
 ```
 
-注意 host 由 Chrome 管理生命周期:先开浏览器+扩展,再让 MCP 客户端连接。
+之后告诉 AI「帮我看看这个页面…」即可。
 
-## 环境变量
+## MCP 工具
 
-- `BROWSER_BRIDGE_PORT`:MCP HTTP 初始端口(默认 1234,被占自动 +1,最多试 20 个)
-- `BROWSER_BRIDGE_MOCK=1`:模拟扩展应答(开发/测试用)
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `browser_control_status` | — | 查询控制目标与连接状态 |
+| `browser_list_tabs` | — | 列出所有标签页 |
+| `browser_use_tab` | `tabId`(-1 回跟随) | 固定/切换控制目标 |
+| `browser_snapshot` | — | 可交互元素快照(ref 编号+坐标) |
+| `browser_click` | `ref`, `button?` | 点击 |
+| `browser_type` | `ref`, `text`, `clear?` | 输入(兼容 React 受控输入) |
+| `browser_press` | `key` | 按键(Enter/Escape/Tab/Arrow…) |
+| `browser_select` | `ref`, `value` | 下拉框 |
+| `browser_scroll` | `dir`, `amount?`, `ref?` | 滚动 |
+| `browser_hover` | `ref` | 悬停 |
+| `browser_goto` / `back` / `refresh` | `url` | 导航 |
+| `browser_wait` | `ms?` | 等待页面稳定 |
 
-## 测试
+AI 自行编排:snapshot → 决策 → 操作 → 再 snapshot,直到任务完成。
+
+## 控制模式
+
+- **跟随模式**(默认):控制你当前激活的标签页,切 tab 即切目标
+- **固定模式**:锁定某个标签页(切换不跟随);popup 一键固定/取消,或 AI 调 `browser_use_tab`
+
+工具栏图标徽标:无 = 跟随中;`AI` 琥珀 = 已固定;`!` 红 = 连接异常。
+
+## 架构
+
+```
+任意 MCP 客户端
+   │ MCP (Streamable HTTP, 127.0.0.1:1234/mcp)
+browser-bridge host(单进程 = MCP ↔ 帧协议翻译器)
+   │ native messaging(stdin/stdout 帧)
+Chrome 扩展
+   ├─ background:转发、目标解析、保活、状态徽标
+   └─ content script:快照 / 执行
+```
+
+MV3 扩展无法监听端口,native host 是唯一通道(Chrome 官方 DevTools MCP 同构)。
+
+## 从源码构建(开发者)
+
+需要 [bun](https://bun.sh):
 
 ```bash
-bun test
+bun install
+bun run build                    # 当前平台 host + 扩展
+./scripts/install-host.sh        # 注册 host(默认内置扩展 ID)
+bun run scripts/build.ts --all   # 交叉编译全部平台 + 发布包(发布用)
+bun test                         # 单元 + MCP API 集成测试(无需浏览器)
 ```
 
-单元测试覆盖帧协议与动作参数校验;集成测试以 mock 模式启动 host,通过 HTTP 验证 MCP 协议全链路(initialize/tools/list/工具调用)。
+## 配置
+
+- `BROWSER_BRIDGE_PORT`:MCP 初始端口(默认 1234,被占自动 +1)
+- `BROWSER_BRIDGE_MOCK=1`:模拟扩展应答(开发测试用)
+
+## 故障排查
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| popup 显示「host 未连接」 | 未安装 host / 浏览器未重启 | 运行 install-host,完全退出浏览器重开 |
+| `Invalid native messaging host name` | host 名含连字符(旧版本) | 更新到新版(host 名 `com.browserbridge`) |
+| 扩展 ID 不匹配 | 用旧版 manifest 加载 | 重新下载扩展,或 install-host 传参 `install-host.sh <你的ID>` |
+| MCP 连不上 | host 未运行 | 先打开浏览器+扩展(host 由 Chrome 拉起) |
+| 目标标签页不可达 | 页面未就绪/不是 http(s) | 等页面加载,或用 `browser_use_tab` 固定 |
+
+## License
+
+[MIT](LICENSE)

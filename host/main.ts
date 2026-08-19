@@ -17,7 +17,8 @@ import { actionFromArgs, PRESS_KEYS, SCROLL_DIRS, BUTTONS } from "../shared/acti
 import type { NativeRequest, NativeResponse, Snapshot } from "../shared/messages";
 
 const START_PORT = Number(process.env.BROWSER_BRIDGE_PORT ?? 1234);
-const PORT_FILE = join(homedir(), ".browser-bridge", "port");
+// 端口文件路径可覆盖(测试/多实例场景避免互相污染)
+const PORT_FILE = process.env.BROWSER_BRIDGE_PORT_FILE ?? join(homedir(), ".browser-bridge", "port");
 const MOCK = process.env.BROWSER_BRIDGE_MOCK === "1";
 let port = START_PORT; // 实际监听端口,由下方端口探测决定
 

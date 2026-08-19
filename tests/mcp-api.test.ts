@@ -36,7 +36,12 @@ async function mcp(method: string, params?: unknown): Promise<Record<string, unk
 beforeAll(async () => {
   proc = Bun.spawn(["bun", "run", "host/main.ts"], {
     cwd: join(import.meta.dir, ".."),
-    env: { ...process.env, BROWSER_BRIDGE_MOCK: "1", BROWSER_BRIDGE_PORT: String(PORT) },
+    env: {
+      ...process.env,
+      BROWSER_BRIDGE_MOCK: "1",
+      BROWSER_BRIDGE_PORT: String(PORT),
+      BROWSER_BRIDGE_PORT_FILE: "/tmp/browser-bridge-test-port", // 不污染共享端口文件
+    },
     stdout: "pipe",
     stderr: "pipe",
   });

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "bun run scripts/build.ts",
-    "install-host": "bun run scripts/install-host.ts",
+    "install-host": "./scripts/install-host.sh",
     "test": "bun test"
   },
   "devDependencies": {
