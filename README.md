@@ -74,7 +74,7 @@ url = "http://127.0.0.1:1234/mcp"
 | `browser_duplicate_tab` | `tabId?` | 复制标签页(缺省复制受控页) |
 | `browser_pin_tab` | `tabId?`, `pinned?` | 固定/取消固定标签页 |
 | `browser_snapshot` | — | 可交互元素快照(ref 编号+坐标) |
-| `browser_extract` | — | 提取正文转 Markdown(读文章/抓数据;非文章页回退整页) |
+| `browser_extract` | `format?`(markdown\|html\|raw) | 提取正文;对话页(ChatGPT/Gemini)按问答轮次组装;format=html 返回净化 HTML,raw 返回原始 body HTML |
 | `browser_screenshot` | — | 可视区截图(dataUrl,视觉理解复杂布局) |
 | `browser_url` | — | 查询当前控制页 URL 与标题(轻量) |
 | `browser_click` | `ref`, `button?` | 点击 |
@@ -87,8 +87,10 @@ url = "http://127.0.0.1:1234/mcp"
 | `browser_hover` | `ref` | 悬停 |
 | `browser_highlight` | `ref` | 高亮元素 1s(用户可见 AI 操作位置) |
 | `browser_drag` | `fromRef`, `toRef` | HTML5 拖拽 |
-| `browser_goto` / `back` / `refresh` | `url` | 导航 |
-| `browser_wait_for` | `ms` \| `selector` \| `text`(二选一) | 等待:定时(ms≤60s),或等元素出现/页面文本出现(UI 条件最多 5s) |
+| `browser_goto` | `url` | 跳转到指定 URL |
+| `browser_back` | — | 浏览器后退 |
+| `browser_refresh` | — | 刷新页面 |
+| `browser_wait_for` | `ms` 或 `selector` 或 `text`(三选一,不可组合) | 等待:定时(ms≤60s),或等元素出现,或等页面文本出现(UI 条件最多 5s) |
 
 AI 自行编排:snapshot → 决策 → 操作 → 再 snapshot,直到任务完成。
 
