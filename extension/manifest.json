@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Browser Bridge",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyHc8hjCx7iscW6ivZ60TMKVZM/Te53BW/j7U+UkftwYrtyuuyyaG93q6V/SofV0Ox6mW8uRONe0w5PKS8n+WUV2C/Y2rGh0aXthIl5C+/7ipAXSvbWznqVgqCxJDpSYN1G2w57KqE3APRranceLJ96bwwhJiBzsc9guqXRgT0ErJ2dbMs8UKtw1AoFXm4QehH7b17ah2305tgIrnYOhJOkOXqjkZkmzvbR5N4sGFROfEa/F2qsdFMv3ZJCWSOKCzX3xKzAqiJMLgiz3Rr7A0EfP3PsthdcS0Q1VNmBgyz6KrPBln5ThLYa1mfxu+tCAwjW7y9GXaZuR7l/wJv/h72QIDAQAB",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AI | 程序 ↔ 浏览器 通用控制桥",
   "permissions": ["activeTab", "scripting", "nativeMessaging", "tabs", "alarms"],
   "host_permissions": ["<all_urls>"],
