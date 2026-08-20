@@ -1,4 +1,4 @@
-// 正文提取:普通文章页走 Readability;对话站(ChatGPT/Gemini)Readability 会丢弃对话轮次,
+// 正文提取:普通文章页走 Readability;对话站(ChatGPT/Gemini/Google AI 模式)Readability 会丢弃对话轮次,
 // 按站点规则直接组装 Markdown,仅复用库的 htmlToMarkdown。
 
 import { extract, htmlToMarkdown } from "@weaming/readability-markdown";
@@ -11,9 +11,15 @@ const MAX_RAW_CHARS = 1_000_000;
 const NOISE_SELECTOR = [
   "button",
   "svg",
+  "textarea",
   "[aria-hidden]",
+  "[role=\"dialog\"]",
+  "[popover]",
+  "[style*=\"display: none\"]",
+  "[data-container-id=\"rhs-col\"]",
   ".sr-only",
   ".cdk-visually-hidden",
+  ".P8PNlb",
   "sup",
   "source-inline-chip",
   "source-footnote",
@@ -79,6 +85,7 @@ interface ChatMessage {
 
 interface ChatRule {
   headingLevel?: 1 | 2; // 提问/回答标题层级,默认 2
+  match?: () => boolean; // 同源不同页面类型时额外校验,返回 false 跳过
   messages: (doc: Document) => ChatMessage[];
 }
 
@@ -99,6 +106,45 @@ const CHAT_RULES: Record<string, ChatRule> = {
         ...query(doc, "message-content div.md-content", false),
       ]),
   },
+  "https://www.google.com": {
+    headingLevel: 1,
+    match: () => !!document.querySelector('div.CKgc1d[data-scope-id="turn"]'),
+    messages: (doc) => {
+      const msgs: ChatMessage[] = [];
+      for (const turn of doc.querySelectorAll<HTMLElement>('div.CKgc1d[data-scope-id="turn"]')) {
+        const heading = turn.querySelector<HTMLElement>("h2.iMqumd");
+        if (heading) {
+          const text = (heading.textContent ?? "").replace(/^您说[：:]\s*/, "").trim();
+          if (text) {
+            const span = doc.createElement("span");
+            span.textContent = text;
+            msgs.push({ el: span, isUser: true });
+          }
+        }
+        const answer = turn.querySelector<HTMLElement>('[data-subtree="aimc"]');
+        if (answer) {
+          const clone = answer.cloneNode(true) as HTMLElement;
+          const chips = [...clone.querySelectorAll<HTMLElement>("span[role='button']")];
+          if (chips.length) {
+            if (chips[0].closest("li")) {
+              for (const chip of chips) chip.replaceWith(doc.createTextNode(chip.textContent ?? ""));
+            } else {
+              const ul = doc.createElement("ul");
+              for (const chip of chips) {
+                const li = doc.createElement("li");
+                li.textContent = chip.textContent ?? "";
+                ul.appendChild(li);
+              }
+              chips[0].replaceWith(ul);
+              for (let i = 1; i < chips.length; i++) chips[i].remove();
+            }
+          }
+          msgs.push({ el: clone, isUser: false });
+        }
+      }
+      return msgs;
+    },
+  },
 };
 
 function query(doc: Document, selector: string, isUser: boolean): ChatMessage[] {
@@ -114,6 +160,7 @@ function domOrder(messages: ChatMessage[]): ChatMessage[] {
 function buildChatExtract(): ContentResponse | null {
   const rule = CHAT_RULES[location.origin];
   if (!rule) return null;
+  if (rule.match && !rule.match()) return null;
 
   const doc = document.cloneNode(true) as Document;
   normalizeEditorBlocks(doc);
@@ -143,33 +190,40 @@ function buildChatExtract(): ContentResponse | null {
 // turndown 在列表内会把围栏代码块整体缩进(顶格恢复,保留块内相对缩进);
 // 标题行不会触发列表/强调等语法,去掉多余转义(如 "2\. xxx")
 function cleanAnswerMd(md: string): string {
-  return collapseListBlanks(cleanLines(md)).join("\n");
+  return collapseListBlanks(cleanLines(md))
+    .join("\n")
+    .replace(/\\\*\\\*/g, "**")
+    .replace(/^(\d+)\\\. /gm, "$1. ")
+    .replace(/^(\w+)\n+(\n```)\n/gm, "$2$1\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function cleanLines(md: string): string[] {
   const lines = md.split("\n");
+  let inFence = false;
   let fenceIndent = 0;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (fenceIndent === 0) {
-      const m = /^(\s+)```/.exec(line);
+    if (!inFence) {
+      const m = /^(\s*)```/.exec(line);
       if (m) {
+        inFence = true;
         fenceIndent = m[1].length;
         lines[i] = line.slice(fenceIndent);
       } else if (/^#{1,6} /.test(line)) {
         lines[i] = line.replace(/\\(.)/g, "$1");
       } else if (/^#{1,6}[^\s#]/.test(line)) {
-        // 模型偶发写出 "##标题"(缺空格),补空格使其成为合法标题
         lines[i] = line.replace(/^(#{1,6})(?=[^\s#])/, "$1 ");
       } else {
-        // 列表内续行/列表项的缩进会渲染成代码块或错位列表,顶格化;
-        // 列表标记后只留一个空格(turndown 默认按最长序号补齐缩进)
         lines[i] = line.trimStart().replace(/^((?:[-*+]|\d{1,9}[.)]))\s{2,}/, "$1 ");
       }
       continue;
     }
-    lines[i] = line.startsWith(" ".repeat(fenceIndent)) ? line.slice(fenceIndent) : line.trimStart();
-    if (/^```/.test(lines[i])) fenceIndent = 0;
+    if (fenceIndent > 0) {
+      lines[i] = line.startsWith(" ".repeat(fenceIndent)) ? line.slice(fenceIndent) : line.trimStart();
+    }
+    if (/^```/.test(lines[i])) inFence = false;
   }
   return lines;
 }
