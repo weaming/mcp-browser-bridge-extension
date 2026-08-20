@@ -3,6 +3,7 @@
 
 import type { Action } from "../shared/actions";
 import type { ContentRequest, ContentResponse, Snapshot, SnapshotNode } from "../shared/messages";
+import { buildExtract } from "./extract";
 
 const SELECTOR = [
   "button",
@@ -245,9 +246,41 @@ function doHover(el: HTMLElement): void {
   }
 }
 
+const WAIT_UI_TIMEOUT_MS = 5000;
+const WAIT_POLL_MS = 100;
+
+function uiCondMet(selector?: string, text?: string): boolean {
+  if (selector) {
+    try {
+      return document.querySelector(selector) !== null;
+    } catch {
+      return false; // 非法选择器视为不匹配,由超时兜底
+    }
+  }
+  if (text) return (document.body.innerText ?? "").includes(text);
+  return false;
+}
+
 async function execute(action: Action): Promise<ContentResponse> {
-  if (action.action === "wait") {
-    await sleep(action.ms ?? 800);
+  if (action.action === "wait_for") {
+    if (action.ms !== undefined) {
+      await sleep(action.ms);
+      return { kind: "execute-result", seq: 0, ok: true };
+    }
+    const deadline = Date.now() + WAIT_UI_TIMEOUT_MS;
+    while (!uiCondMet(action.selector, action.text)) {
+      if (Date.now() >= deadline) {
+        const what = action.selector ? `selector ${action.selector}` : `文本 "${action.text}"`;
+        return {
+          kind: "execute-result",
+          seq: 0,
+          ok: false,
+          code: "rejected",
+          detail: `等待超时(${WAIT_UI_TIMEOUT_MS}ms):${what} 未出现`,
+        };
+      }
+      await sleep(WAIT_POLL_MS);
+    }
     return { kind: "execute-result", seq: 0, ok: true };
   }
   if (action.action === "goto") {
@@ -349,6 +382,10 @@ function handleMessage(msg: ContentRequest, _sender: unknown, sendResponse: (r: 
         title: s.title,
         snapshot: s,
       } satisfies ContentResponse);
+    } else if (msg.kind === "extract") {
+      const r = buildExtract(msg.format);
+      r.seq = msg.seq;
+      sendResponse(r);
     } else if (msg.kind === "execute") {
       const r = await execute(msg.action);
       r.seq = msg.seq;

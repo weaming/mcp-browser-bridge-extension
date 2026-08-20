@@ -52,10 +52,17 @@ describe("actionFromArgs", () => {
     expect(isError(actionFromArgs("goto", { url: "javascript:alert(1)" }))).toBe(true);
   });
 
-  test("wait 上限 60s,back/refresh 无参", () => {
-    expect(actionFromArgs("wait", {})).toEqual({ action: "wait" });
-    expect(actionFromArgs("wait", { ms: 2000 })).toEqual({ action: "wait", ms: 2000 });
-    expect(actionFromArgs("wait", { ms: 100_000 })).toEqual({ action: "wait", ms: 60_000 });
+  test("wait_for 时间/UI 条件二选一,ms 上限 60s", () => {
+    expect(actionFromArgs("wait_for", { ms: 2000 })).toEqual({ action: "wait_for", ms: 2000 });
+    expect(actionFromArgs("wait_for", { ms: 100_000 })).toEqual({ action: "wait_for", ms: 60_000 });
+    expect(actionFromArgs("wait_for", { selector: "#btn" })).toEqual({ action: "wait_for", selector: "#btn" });
+    expect(actionFromArgs("wait_for", { text: "加载完成" })).toEqual({ action: "wait_for", text: "加载完成" });
+    expect(isError(actionFromArgs("wait_for", {}))).toBe(true);
+    expect(isError(actionFromArgs("wait_for", { ms: 500, selector: "#btn" }))).toBe(true);
+    expect(isError(actionFromArgs("wait_for", { selector: "#btn", text: "x" }))).toBe(true);
+  });
+
+  test("back/refresh 无参", () => {
     expect(actionFromArgs("back", {})).toEqual({ action: "back" });
     expect(actionFromArgs("refresh", {})).toEqual({ action: "refresh" });
   });

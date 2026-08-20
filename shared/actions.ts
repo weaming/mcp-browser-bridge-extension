@@ -2,7 +2,7 @@
 
 export const ACTION_NAMES = [
   "click", "type", "press", "select", "scroll", "hover",
-  "goto", "back", "refresh", "wait", "dblclick", "highlight", "drag",
+  "goto", "back", "refresh", "wait_for", "dblclick", "highlight", "drag",
 ] as const;
 export type ActionName = (typeof ACTION_NAMES)[number];
 
@@ -31,7 +31,7 @@ export type Action =
   | { action: "goto"; url: string }
   | { action: "back" }
   | { action: "refresh" }
-  | { action: "wait"; ms?: number };
+  | { action: "wait_for"; selector?: string; text?: string; ms?: number };
 
 export interface ActionParseError {
   ok: false;
@@ -116,11 +116,20 @@ export function actionFromArgs(kind: ActionName, args: Record<string, unknown>):
       }
       return { action: "goto", url: args.url };
     }
-    case "wait":
-      return {
-        action: "wait",
-        ...(typeof args.ms === "number" && args.ms > 0 ? { ms: Math.min(args.ms, 60_000) } : {}),
-      };
+    case "wait_for": {
+      const ms = typeof args.ms === "number" && args.ms > 0 ? Math.min(args.ms, 60_000) : undefined;
+      const selector = typeof args.selector === "string" && args.selector ? args.selector : undefined;
+      const text = typeof args.text === "string" && args.text ? args.text : undefined;
+      const timeCond = ms !== undefined;
+      const uiCond = selector !== undefined || text !== undefined;
+      if (timeCond === uiCond) {
+        return { ok: false, error: "wait_for 需且仅需一个条件:ms(时间) 或 selector/text(UI),二者只能选一" };
+      }
+      if (selector !== undefined && text !== undefined) {
+        return { ok: false, error: "wait_for 的 selector 与 text 只能选一" };
+      }
+      return { action: "wait_for", ...(ms !== undefined ? { ms } : {}), ...(selector ? { selector } : {}), ...(text ? { text } : {}) };
+    }
     case "back":
       return { action: "back" };
     case "refresh":

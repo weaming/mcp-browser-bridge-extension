@@ -31,13 +31,17 @@ export interface Snapshot {
 
 // ---------- content ↔ background ----------
 
+export type ExtractFormat = "markdown" | "html" | "raw"; // raw:原始 body HTML(分析页面结构用)
+
 export type ContentRequest =
   | { kind: "snapshot"; seq: number }
+  | { kind: "extract"; seq: number; format?: ExtractFormat }
   | { kind: "execute"; seq: number; action: Action };
 
 export type ContentResponse =
   | { kind: "snapshot"; seq: number; url: string; title: string; snapshot: Snapshot }
   | { kind: "snapshot-error"; seq: number; code: "no-content" | "not-injectable"; message: string }
+  | { kind: "extract-result"; seq: number; ok: boolean; url?: string; title?: string; content?: string; fallback?: boolean; message?: string }
   | {
       kind: "execute-result";
       seq: number;
@@ -60,6 +64,7 @@ export interface TabInfo {
 
 export type NativeRequest =
   | { t: "snapshot"; seq: number }
+  | { t: "extract"; seq: number; format?: ExtractFormat }
   | { t: "execute"; seq: number; action: Action }
   | { t: "list-tabs"; seq: number }
   | { t: "set-target"; seq: number; tabId: number }
@@ -76,6 +81,7 @@ export type NativeRequest =
 export type NativeResponse =
   | { t: "snapshot"; seq: number; url: string; title: string; snapshot: Snapshot }
   | { t: "snapshot-error"; seq: number; code: string; message: string }
+  | { t: "extract-result"; seq: number; ok: boolean; url?: string; title?: string; content?: string; fallback?: boolean; message?: string }
   | {
       t: "execute-result";
       seq: number;

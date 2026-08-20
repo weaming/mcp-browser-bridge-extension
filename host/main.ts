@@ -93,6 +93,16 @@ function mockRespond(msg: FrameRequest): Promise<NativeResponse> {
   if (msg.t === "snapshot") {
     return Promise.resolve({ t: "snapshot", seq: msg.seq, url: snap.url, title: snap.title, snapshot: snap });
   }
+  if (msg.t === "extract") {
+    return Promise.resolve({
+      t: "extract-result",
+      seq: msg.seq,
+      ok: true,
+      url: "https://example.com/mock",
+      title: "Mock Page",
+      content: "# Mock Page\n\n这是 mock 的正文 Markdown 内容。",
+    });
+  }
   if (msg.t === "list-tabs") {
     return Promise.resolve({
       t: "tabs",
@@ -276,6 +286,23 @@ tool("browser_snapshot", "获取当前受控页面的可交互元素快照(带 r
 });
 
 tool(
+  "browser_extract",
+  "提取当前控制页面的正文内容并转为 Markdown(读文章/抓数据用,比 snapshot 省 token;对话页按问答轮次组装);format=html 返回净化 HTML,format=raw 返回原始 body HTML",
+  { format: z.enum(["markdown", "html", "raw"]).optional() },
+  async (args) => {
+    const resp = await sendToExtension({ t: "extract", seq: ++seq, format: args.format }, 30_000);
+    if (resp.t === "extract-result") {
+      if (!resp.ok) return `提取失败: ${resp.message ?? "未知"}`;
+      const head = [`URL: ${resp.url ?? ""}`, `标题: ${resp.title ?? ""}`];
+      if (resp.fallback) head.push("(非文章型页面,以下为整页转换结果)");
+      return `${head.join("\n")}\n\n${resp.content ?? ""}`;
+    }
+    if (resp.t === "error") return `提取失败: ${resp.message}`;
+    return "提取失败: 扩展无响应";
+  },
+);
+
+tool(
   "browser_click",
   "点击快照中 ref 编号的元素",
   { ref: z.number().int().positive(), button: z.enum(BUTTONS).optional() },
@@ -317,8 +344,27 @@ tool("browser_back", "浏览器后退", {}, async () => executeAction("back", {}
 
 tool("browser_refresh", "刷新页面", {}, async () => executeAction("refresh", {}));
 
-tool("browser_wait", "等待页面稳定(ms 毫秒,默认 800)", { ms: z.number().int().optional() }, async (args) =>
-  executeAction("wait", args),
+tool(
+  "browser_wait_for",
+  "等待条件满足,二选一(同时传或都不传会报错):ms=定时等待毫秒数;selector=等元素出现,或 text=等页面出现指定文本(UI 条件最多等 5 秒)",
+  {
+    ms: z.number().int().positive().optional(),
+    selector: z.string().optional(),
+    text: z.string().optional(),
+  },
+  async (args) => {
+    const action = actionFromArgs("wait_for", args);
+    if (!("action" in action)) return `参数错误: ${action.error}`;
+    // 定时等待最长 60s,扩展响应超时需相应放宽
+    const timeoutMs = typeof args.ms === "number" ? Math.min(args.ms, 60_000) + 2000 : 10_000;
+    const resp = await sendToExtension({ t: "execute", seq: ++seq, action }, timeoutMs);
+    if (resp.t === "execute-result") {
+      if (resp.ok) return "ok";
+      return `失败: ${resp.code ?? "unknown"}${resp.detail ? ` — ${resp.detail}` : ""}`;
+    }
+    if (resp.t === "error") return `失败: ${resp.message}`;
+    return "失败: 扩展无响应";
+  },
 );
 
 tool("browser_new_tab", "新建标签页并立即跳转(url 可选,缺省开空白新标签页)", { url: z.string().regex(/^https?:\/\//).optional() }, async (args) => {

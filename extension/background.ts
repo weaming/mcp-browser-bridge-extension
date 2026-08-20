@@ -284,6 +284,9 @@ async function handleNative(msg: NativeRequest): Promise<void> {
   if (msg.t === "snapshot") {
     const req: ContentRequest = { kind: "snapshot", seq: msg.seq };
     contentResp = await chrome.tabs.sendMessage(targetTabId, req).catch(() => null);
+  } else if (msg.t === "extract") {
+    const req: ContentRequest = { kind: "extract", seq: msg.seq, format: msg.format };
+    contentResp = await chrome.tabs.sendMessage(targetTabId, req).catch(() => null);
   } else if (msg.t === "execute") {
     const req: ContentRequest = { kind: "execute", seq: msg.seq, action: msg.action };
     contentResp = await chrome.tabs.sendMessage(targetTabId, req).catch(() => null);
@@ -305,6 +308,17 @@ async function handleNative(msg: NativeRequest): Promise<void> {
       t: "snapshot-error",
       seq: contentResp.seq,
       code: contentResp.code,
+      message: contentResp.message,
+    } satisfies NativeResponse);
+  } else if (contentResp.kind === "extract-result") {
+    port?.postMessage({
+      t: "extract-result",
+      seq: contentResp.seq,
+      ok: contentResp.ok,
+      url: contentResp.url,
+      title: contentResp.title,
+      content: contentResp.content,
+      fallback: contentResp.fallback,
       message: contentResp.message,
     } satisfies NativeResponse);
   } else {

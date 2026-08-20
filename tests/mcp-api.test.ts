@@ -92,10 +92,12 @@ describe("MCP protocol", () => {
     const tools = (list.result as { tools: { name: string }[] }).tools;
     const names = tools.map((t) => t.name);
     expect(names).toContain("browser_snapshot");
+    expect(names).toContain("browser_extract");
     expect(names).toContain("browser_click");
     expect(names).toContain("browser_type");
     expect(names).toContain("browser_goto");
-    expect(names).toContain("browser_wait");
+    expect(names).toContain("browser_wait_for");
+    expect(names).not.toContain("browser_wait");
   });
 
   test("browser_snapshot 返回快照文本", async () => {
@@ -105,6 +107,13 @@ describe("MCP protocol", () => {
     expect(text).toContain("Mock Page");
     expect(text).toContain("[1] <BUTTON> \"登录\"");
     expect(text).toContain("[2] <INPUT type=text> \"搜索\"");
+  });
+
+  test("browser_extract 返回正文 Markdown", async () => {
+    const resp = await mcp("tools/call", { name: "browser_extract", arguments: {} });
+    const text = (resp.result as { content: { type: string; text: string }[] }).content[0].text;
+    expect(text).toContain("标题: Mock Page");
+    expect(text).toContain("mock 的正文 Markdown 内容");
   });
 
   test("browser_click 执行成功", async () => {
@@ -125,6 +134,17 @@ describe("MCP protocol", () => {
     const resp = await mcp("tools/call", { name: "browser_goto", arguments: { url: "javascript:x" } });
     const text = (resp.result as { content: { text: string }[] }).content[0].text;
     expect(text).toContain("参数错误");
+  });
+
+  test("browser_wait_for 条件二选一", async () => {
+    const byTime = await mcp("tools/call", { name: "browser_wait_for", arguments: { ms: 100 } });
+    expect((byTime.result as { content: { text: string }[] }).content[0].text).toBe("ok");
+
+    const byUi = await mcp("tools/call", { name: "browser_wait_for", arguments: { selector: "#btn" } });
+    expect((byUi.result as { content: { text: string }[] }).content[0].text).toBe("ok");
+
+    const both = await mcp("tools/call", { name: "browser_wait_for", arguments: { ms: 100, text: "x" } });
+    expect((both.result as { content: { text: string }[] }).content[0].text).toContain("参数错误");
   });
 
   test("browser_list_tabs 返回标签页列表", async () => {
