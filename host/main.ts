@@ -15,7 +15,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { encodeFrame, FrameReader } from "./native-protocol";
 import { actionFromArgs, PRESS_KEYS, SCROLL_DIRS, BUTTONS, MODIFIERS } from "../shared/actions";
-import type { NativeRequest, NativeResponse, Snapshot } from "../shared/messages";
+import type { ExtractFormat, NativeRequest, NativeResponse, Snapshot } from "../shared/messages";
 
 const START_PORT = Number(process.env.BROWSER_BRIDGE_PORT ?? 1234);
 // 端口文件路径可覆盖(测试/多实例场景避免互相污染)
@@ -290,7 +290,7 @@ tool(
   "提取当前控制页面的正文内容并转为 Markdown(读文章/抓数据用,比 snapshot 省 token;对话页按问答轮次组装);format=html 返回净化 HTML,format=raw 返回原始 body HTML",
   { format: z.enum(["markdown", "html", "raw"]).optional() },
   async (args) => {
-    const resp = await sendToExtension({ t: "extract", seq: ++seq, format: args.format }, 30_000);
+    const resp = await sendToExtension({ t: "extract", seq: ++seq, format: args.format as ExtractFormat | undefined }, 30_000);
     if (resp.t === "extract-result") {
       if (!resp.ok) return `提取失败: ${resp.message ?? "未知"}`;
       const head = [`URL: ${resp.url ?? ""}`, `标题: ${resp.title ?? ""}`];
