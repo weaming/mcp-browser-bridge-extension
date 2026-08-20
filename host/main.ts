@@ -508,7 +508,7 @@ tool(
 
 // SDK 的 Server 实例只能 connect 一次,每个 MCP session 创建独立实例。
 function createMcpServer(): McpServer {
-  const mcp = new McpServer({ name: "browser-bridge", version: "0.1.0" });
+  const mcp = new McpServer({ name: "browser-bridge", version: "0.1.1" });
   for (const [name, def] of TOOLS) {
     // SDK 泛型重载无法从动态 schema/handler 推断,用 any 逃逸
     (mcp as unknown as { tool: (n: string, d: string, s: unknown, cb: (a: Record<string, unknown>) => unknown) => unknown }).tool(

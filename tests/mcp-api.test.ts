@@ -67,7 +67,7 @@ describe("MCP protocol", () => {
     const resp = await mcp("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
-      clientInfo: { name: "mcp-api-test", version: "0.1.0" },
+      clientInfo: { name: "mcp-api-test", version: "0.1.1" },
     });
     expect(resp).toHaveProperty("result");
     expect((resp.result as { serverInfo: { name: string } }).serverInfo.name).toBe("browser-bridge");
