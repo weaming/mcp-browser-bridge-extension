@@ -91,8 +91,25 @@ url = "http://127.0.0.1:1234/mcp"
 | `browser_back` | — | 浏览器后退 |
 | `browser_refresh` | — | 刷新页面 |
 | `browser_wait_for` | `ms` 或 `selector` 或 `text`(三选一,不可组合) | 等待:定时(ms≤60s),或等元素出现,或等页面文本出现(UI 条件最多 5s) |
+| `browser_eval` | `code`, `world?`(main\|isolated), `await?`, `timeout_ms?` | 在页面执行 JS(默认 main=真实页面上下文,可读 localStorage/页面变量、改 DOM);结果 JSON 化返回,循环引用/函数/DOM 都能安全序列化 |
+| `browser_network` | `op?`(list\|install\|clear), `filter?`, `limit?`, `include_body?`, `redact?`, `since_id?` | 查看页面真实网络请求。`install` 装一次钩子后,fetch/XHR 全部记录(含流式 SSE 响应体);默认对 authorization/cookie/api-key 等 header 打码 |
+| `browser_reload_extension` | — | 重载扩展使磁盘上的新代码生效(改完扩展文件后用,≤30s 自动重连) |
 
 AI 自行编排:snapshot → 决策 → 操作 → 再 snapshot,直到任务完成。
+
+### browser_eval / browser_network 用法
+
+前者用于读页面内部状态(如登录 token、前端 store)、调页面函数、临时改样式;后者用于观察接口协议:
+
+```
+# 1. 装钩子(一次即可,页面 reload 后需重装)
+browser_network(op="install")
+# 2. 照常操作页面(点击/输入/或 browser_eval 里自己发 fetch)
+# 3. 看刚才发了什么
+browser_network(op="list", filter="completion", include_body=true)
+```
+
+限制:钩子在页面 reload 后丢失(需重装);只覆盖 `fetch` 与 `XMLHttpRequest`(WebSocket/EventSource 不抓);响应体用 `clone()` 旁路读取,封顶 200KB/条、300 条。
 
 ## 控制模式
 
@@ -117,10 +134,27 @@ MV3 扩展无法监听端口,native host 是唯一通道(Chrome 官方 DevTools 
 
 ## 从源码构建(开发者)
 
-需要 [bun](https://bun.sh):
+需要 [bun](https://bun.sh)。日常开发用 `make`:
 
 ```bash
-bun install
+make            # = make deploy:构建 host + 扩展,并 rsync 到 Chrome 加载目录
+make setup      # 首次安装:deploy + 注册 native host
+make build      # 只构建:dist/browser-bridge-host + extension-dist/
+make host       # 只注册 native host(HOST_TARGET=--chromium/--edge/--all 可指定)
+make test       # bun test(含 mock 模式 MCP API 集成测试)
+make typecheck  # tsc --noEmit
+make pack       # 交叉编译 5 平台发布包 dist/release/*.zip
+make reload     # 让扩展重载、加载磁盘上的新代码
+make status     # 查看 host 的 MCP 端口
+```
+
+`EXT_DIR` 默认 `~/chrome/browser-bridge`(即 chrome://extensions 里加载的那个目录),可用 `make deploy EXT_DIR=...` 覆盖。
+
+> **生效方式**:扩展是 unpacked 加载,但 Chrome **不会**因为文件变化自动重载它 —— service worker 被扩展内的 30s 保活 alarm 长期托住,旧代码会一直活着。正确姿势:`make deploy` 之后跑 `make reload`(调 `browser_reload_extension` 工具触发 `chrome.runtime.reload()`),或手动在 chrome://extensions 点一次「重新加载」。重载后扩展会在 ≤30s 内重连 host,Chrome 会用新编译的 host 二进制重新拉起进程。
+
+手动构建(等价):
+
+```bash
 bun run build                    # 当前平台 host + 扩展
 ./scripts/install-host.sh        # 注册 host(默认内置扩展 ID)
 bun run scripts/build.ts --all   # 交叉编译全部平台 + 发布包(发布用)

@@ -33,12 +33,16 @@ export interface Snapshot {
 
 export type ExtractFormat = "markdown" | "html" | "raw"; // raw:原始 body HTML(分析页面结构用)
 
+export type EvalWorld = "main" | "isolated"; // main=页面真实上下文(可读页面变量);isolated=content script 世界
+
 export type ContentRequest =
+  | { kind: "ping"; seq: number }
   | { kind: "snapshot"; seq: number }
   | { kind: "extract"; seq: number; format?: ExtractFormat }
   | { kind: "execute"; seq: number; action: Action };
 
 export type ContentResponse =
+  | { kind: "pong"; seq: number }
   | { kind: "snapshot"; seq: number; url: string; title: string; snapshot: Snapshot }
   | { kind: "snapshot-error"; seq: number; code: "no-content" | "not-injectable"; message: string }
   | { kind: "extract-result"; seq: number; ok: boolean; url?: string; title?: string; content?: string; fallback?: boolean; message?: string }
@@ -49,6 +53,36 @@ export type ContentResponse =
       code?: "stale-ref" | "nav-error" | "rejected";
       detail?: string;
     };
+
+// ---------- 网络抓包(页面内钩子的读取结果) ----------
+
+export interface NetworkEntryView {
+  id: number;
+  kind: "fetch" | "xhr";
+  method: string;
+  url: string;
+  status: number | null;
+  ok: boolean | null;
+  durationMs: number | null;
+  startTs: number;
+  requestHeaders?: Record<string, string>;
+  requestHeadersRaw?: Record<string, string>;
+  responseHeaders?: Record<string, string>;
+  requestBody?: string;
+  responseBody?: string;
+  responseBodyTruncated?: boolean;
+  error?: string;
+  note?: string;
+}
+
+export interface NetworkReadView {
+  installed: boolean;
+  installedAt: number | null;
+  total: number; // 缓冲区现有条数
+  dropped: number; // 因超出上限被丢弃的条数
+  nextId: number;
+  entries: NetworkEntryView[];
+}
 
 // ---------- 标签页信息 ----------
 
@@ -76,6 +110,19 @@ export type NativeRequest =
   | { t: "pin-tab"; seq: number; tabId?: number; pinned: boolean }
   | { t: "screenshot"; seq: number }
   | { t: "get-port"; seq: number }
+  | { t: "eval"; seq: number; code: string; world: EvalWorld; awaitResult: boolean; timeoutMs: number }
+  | { t: "reload-ext"; seq: number }
+  | {
+      t: "net";
+      seq: number;
+      op: "install" | "list" | "clear";
+      force?: boolean; // install:丢掉旧状态重建(修复被外部改坏的钩子)
+      filter?: string;
+      limit?: number;
+      includeBody?: boolean;
+      redact?: boolean;
+      sinceId?: number;
+    }
   | { t: "ping" };
 
 export type NativeResponse =
@@ -113,6 +160,9 @@ export type NativeResponse =
   | { t: "duplicate-tab-result"; seq: number; ok: boolean; tabId?: number; message?: string }
   | { t: "pin-tab-result"; seq: number; ok: boolean; message?: string }
   | { t: "screenshot-result"; seq: number; ok: boolean; dataUrl?: string; message?: string }
+  | { t: "eval-result"; seq: number; ok: boolean; value?: string; error?: string }
+  | { t: "reload-result"; seq: number; ok: boolean; message?: string }
+  | { t: "net-result"; seq: number; ok: boolean; op: string; snapshot?: NetworkReadView; message?: string }
   | { t: "pong" }
   | { t: "error"; seq: number; message: string };
 

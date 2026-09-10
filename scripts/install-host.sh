@@ -26,12 +26,16 @@ if [[ ! "$EXT_ID" =~ ^[a-p]{32}$ ]]; then
   exit 1
 fi
 
-# host 与脚本同目录
+# host 与脚本同目录(发布包布局);开发仓库里 host 在 ../dist/(build.ts 的产物)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST_PATH="$SCRIPT_DIR/browser-bridge-host"
 if [ ! -f "$HOST_PATH" ]; then
-  echo "找不到 $HOST_PATH(应与脚本在同一目录)"
-  exit 1
+  if [ -f "$SCRIPT_DIR/../dist/browser-bridge-host" ]; then
+    HOST_PATH="$(cd "$SCRIPT_DIR/.." && pwd)/dist/browser-bridge-host"
+  else
+    echo "找不到 $HOST_PATH(应与脚本在同一目录,或开发仓库的 ../dist/browser-bridge-host)"
+    exit 1
+  fi
 fi
 
 # 各浏览器候选目录

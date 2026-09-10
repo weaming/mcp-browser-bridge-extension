@@ -327,7 +327,7 @@ async function execute(action: Action): Promise<ContentResponse> {
         seq: 0,
         ok: false,
         code: "stale-ref",
-        detail: `ref ${action.ref} 不存在(refMap ${refMap.size}, flag ${window.__browserBridgeInjected})`,
+        detail: `ref ${action.ref} 不存在(refMap ${refMap.size}, 实例序号 ${window.__browserBridgeInstanceSeq ?? 1}${retired ? ", 已退场" : ""})`,
       };
     }
 
@@ -362,18 +362,40 @@ async function execute(action: Action): Promise<ContentResponse> {
 // ---------- 消息 ----------
 
 // 幂等注入:静态 content_scripts 与动态 executeScript 可能重复注入;
-// 扩展重载后旧实例不会自动移除,通过页面消息广播"接管",旧实例自动停用。
+// 扩展重载后旧实例不会自动移除:每次注入都注册监听并广播"接管",旧实例收到后退场。
+// 关键:退场逻辑不能依赖 chrome API —— 重载后旧实例的扩展上下文已失效,
+// chrome.runtime.removeListener 会抛错,所以用本地 retired 标志让 handleMessage 直接让路。
 declare global {
   interface Window {
-    __browserBridgeInjected?: boolean;
+    __browserBridgeInjected?: boolean; // 是否已有实例(诊断信息)
+    __browserBridgeInstanceSeq?: number; // 本 frame 注入过多少次
+    __browserBridgeCleanup?: () => void; // 上一实例的退场钩子(同 world 共享 window)
   }
 }
 
 const INSTANCE_ID = Math.random().toString(36).slice(2);
 
+let retired = false;
+
+// 退场:置标志(不依赖 chrome API),能移除监听则顺手移除
+function retire(): void {
+  if (retired) return;
+  retired = true;
+  try {
+    chrome.runtime.onMessage.removeListener(handleMessage);
+  } catch {
+    // 扩展重载后旧上下文已失效,靠 retired 标志拦下后续消息
+  }
+  refMap = new Map();
+}
+
 function handleMessage(msg: ContentRequest, _sender: unknown, sendResponse: (r: ContentResponse) => void): boolean {
+  // 已让位给新实例:不响应(返回 false 让其它监听者应答,避免占用消息通道)
+  if (retired) return false;
   void (async () => {
-    if (msg.kind === "snapshot") {
+    if (msg.kind === "ping") {
+      sendResponse({ kind: "pong", seq: msg.seq } satisfies ContentResponse);
+    } else if (msg.kind === "snapshot") {
       const s = buildSnapshot();
       sendResponse({
         kind: "snapshot",
@@ -395,18 +417,26 @@ function handleMessage(msg: ContentRequest, _sender: unknown, sendResponse: (r: 
   return true; // 异步响应
 }
 
-if (!window.__browserBridgeInjected) {
-  window.__browserBridgeInjected = true;
-
-  // 旧实例(扩展重载前的)收到接管广播后停用自己,避免双实例竞争
-  window.addEventListener("message", (e) => {
-    const d = e.data as { type?: string; id?: string };
-    if (d?.type === "browser-bridge-takeover" && d.id !== INSTANCE_ID) {
-      window.__browserBridgeInjected = false;
-      chrome.runtime.onMessage.removeListener(handleMessage);
-    }
-  });
-
-  chrome.runtime.onMessage.addListener(handleMessage);
-  window.postMessage({ type: "browser-bridge-takeover", id: INSTANCE_ID }, "*");
+// 上一实例立即退场(同 frame 的 isolated world 共享 window;旧版本代码没有 cleanup 钩子,
+// 只靠下面的 takeover 广播退场,两条路径并存)
+if (typeof window.__browserBridgeCleanup === "function") {
+  try {
+    window.__browserBridgeCleanup();
+  } catch {
+    // 旧实例已失效,忽略
+  }
 }
+window.__browserBridgeCleanup = retire;
+window.__browserBridgeInjected = true;
+window.__browserBridgeInstanceSeq = (window.__browserBridgeInstanceSeq ?? 0) + 1;
+
+// 收到别的实例的接管广播就退场(兼容旧版实例)
+window.addEventListener("message", (e) => {
+  const d = e.data as { type?: string; id?: string };
+  if (d?.type === "browser-bridge-takeover" && d.id !== INSTANCE_ID) retire();
+});
+
+// 总是注册监听 + 广播接管:不能因为"已有实例"就跳过注册,
+// 否则扩展重载后新实例会让路给一个已经发不出响应的旧实例,页面直接死掉。
+chrome.runtime.onMessage.addListener(handleMessage);
+window.postMessage({ type: "browser-bridge-takeover", id: INSTANCE_ID }, "*");

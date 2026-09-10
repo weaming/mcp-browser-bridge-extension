@@ -5,11 +5,13 @@
 import type {
   ContentRequest,
   ContentResponse,
+  NetworkReadView,
   NativeRequest,
   NativeResponse,
   PopupRequest,
   PopupResponse,
 } from "../shared/messages";
+import { clearNetwork, evalInPage, installNetworkHook, readNetwork } from "./injected";
 
 const HOST_NAME = "com.browserbridge";
 
@@ -60,8 +62,27 @@ async function resolveTargetTabId(): Promise<number | null> {
 // 页面导航(loading)或关闭时清除记录,下次操作重新注入
 const injectedTabs = new Set<number>();
 
+// 页面里的 content script 是否还活着:扩展重载后旧实例的扩展上下文已失效,
+// 既收不到也回不了消息。只有确认它已死才重新注入 —— 避免新旧实例并存,
+// 也避免"新实例让位给回不了响应的旧实例"导致页面无人应答。
+async function isContentScriptAlive(tabId: number): Promise<boolean> {
+  try {
+    const resp = (await chrome.tabs.sendMessage(tabId, {
+      kind: "ping",
+      seq: -1,
+    } satisfies ContentRequest)) as ContentResponse | undefined;
+    return resp?.kind === "pong";
+  } catch {
+    return false;
+  }
+}
+
 async function ensureInjected(tabId: number): Promise<void> {
   if (injectedTabs.has(tabId)) return;
+  if (await isContentScriptAlive(tabId)) {
+    injectedTabs.add(tabId);
+    return;
+  }
   await chrome.scripting
     .executeScript({ target: { tabId }, files: ["content-script.js"] })
     .catch(() => {});
@@ -270,6 +291,86 @@ async function handleNative(msg: NativeRequest): Promise<void> {
     } satisfies NativeResponse);
     return;
   }
+  if (msg.t === "reload-ext") {
+    // 先回执再重载(重载会断开 native port、杀掉 host 进程)
+    port?.postMessage({
+      t: "reload-result",
+      seq: msg.seq,
+      ok: true,
+      message: "扩展即将重载:host 会断开并在 ≤30s 内用新二进制重连",
+    } satisfies NativeResponse);
+    setTimeout(() => chrome.runtime.reload(), 150);
+    return;
+  }
+  if (msg.t === "eval") {
+    const tabId = await requireTarget(msg.seq);
+    if (tabId === null) return;
+    const world = msg.world === "isolated" ? "ISOLATED" : "MAIN";
+    const out = await runInPage(tabId, world, evalInPage, [msg.code, msg.awaitResult, msg.timeoutMs]);
+    port?.postMessage({
+      t: "eval-result",
+      seq: msg.seq,
+      ok: out.ok,
+      value: out.ok ? (typeof out.value === "string" ? out.value : JSON.stringify(out.value)) : undefined,
+      error: out.error,
+    } satisfies NativeResponse);
+    return;
+  }
+  if (msg.t === "net") {
+    const tabId = await requireTarget(msg.seq);
+    if (tabId === null) return;
+    const op = msg.op ?? "list";
+    if (op === "install") {
+      const out = await runInPage(tabId, "MAIN", installNetworkHook, [
+        { maxEntries: NET_MAX_ENTRIES, maxBody: NET_MAX_BODY },
+        msg.force === true,
+      ]);
+      const r = out.value as { reused?: boolean; total?: number } | undefined;
+      port?.postMessage({
+        t: "net-result",
+        seq: msg.seq,
+        ok: out.ok,
+        op,
+        message: out.ok
+          ? r
+            ? `钩子已安装(${r.reused ? "复用已有" : "新装/重建"}),缓冲区 ${r.total ?? 0} 条`
+            : "钩子已安装"
+          : out.error,
+      } satisfies NativeResponse);
+      return;
+    }
+    if (op === "clear") {
+      const out = await runInPage(tabId, "MAIN", clearNetwork, []);
+      const r = out.value as { cleared?: number } | undefined;
+      port?.postMessage({
+        t: "net-result",
+        seq: msg.seq,
+        ok: out.ok,
+        op,
+        message: out.ok ? `已清空 ${r?.cleared ?? 0} 条` : out.error,
+      } satisfies NativeResponse);
+      return;
+    }
+    const out = await runInPage(tabId, "MAIN", readNetwork, [
+      {
+        filter: msg.filter,
+        limit: Math.min(Math.max(msg.limit ?? 20, 1), 100),
+        includeBody: msg.includeBody === true,
+        redact: msg.redact !== false,
+        sinceId: msg.sinceId,
+        maxBodyChars: 20_000,
+      },
+    ]);
+    port?.postMessage({
+      t: "net-result",
+      seq: msg.seq,
+      ok: out.ok,
+      op,
+      snapshot: out.ok ? (out.value as NetworkReadView) : undefined,
+      message: out.error,
+    } satisfies NativeResponse);
+    return;
+  }
   const targetTabId = await resolveTargetTabId();
   if (targetTabId === null) {
     port?.postMessage({
@@ -330,6 +431,61 @@ async function handleNative(msg: NativeRequest): Promise<void> {
       detail: contentResp.detail,
     } satisfies NativeResponse);
   }
+}
+
+// ---------- 页面内执行 / 网络抓包(scripting 注入) ----------
+
+// 网络钩子缓冲区上限:条数 / 单个 body 字符数
+const NET_MAX_ENTRIES = 300;
+const NET_MAX_BODY = 200_000;
+
+interface InjectionOutcome {
+  ok: boolean;
+  value?: unknown;
+  error?: string;
+}
+
+// 在受控标签页执行注入函数(world=MAIN 时运行在页面真实上下文)。
+// 注入函数必须自包含(见 extension/injected.ts 顶部约束)。
+async function runInPage<A extends unknown[], R>(
+  tabId: number,
+  world: "MAIN" | "ISOLATED",
+  func: (...args: A) => R,
+  args: A,
+): Promise<InjectionOutcome> {
+  try {
+    const injection = { target: { tabId }, world, func, args } as unknown as Parameters<
+      typeof chrome.scripting.executeScript
+    >[0];
+    const results = (await chrome.scripting.executeScript(injection)) as unknown as {
+      result?: unknown;
+      error?: unknown;
+    }[];
+    const first = results?.[0];
+    if (!first) return { ok: false, error: "注入无返回(页面未就绪或其 frame 不可注入)" };
+    if (first.error !== undefined) return { ok: false, error: String(first.error) };
+    // 页面正在刷新/导航时,注入会落在被销毁的 frame 上;返回值含 undefined 时
+    // base::Value 转换失败会得到 null —— 两者都当作错误报出来,不要当成"成功但无数据"
+    if (first.result === undefined || first.result === null) {
+      return { ok: false, error: "注入未返回可用结果(页面可能正在刷新/导航,或返回值无法序列化)" };
+    }
+    return { ok: true, value: first.result };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+// 目标页不可用时的统一错误响应(内部标签页/chrome:// 页面无法注入)
+async function requireTarget(seq: number): Promise<number | null> {
+  const tabId = await resolveTargetTabId();
+  if (tabId === null) {
+    port?.postMessage({
+      t: "error",
+      seq,
+      message: "没有可控制的标签页:当前激活标签页需是 http/https 页面,或用 browser_use_tab 固定目标",
+    } satisfies NativeResponse);
+  }
+  return tabId;
 }
 
 // ---------- 截图(captureVisibleTab → OffscreenCanvas 压缩 JPEG) ----------

@@ -97,6 +97,8 @@ describe("MCP protocol", () => {
     expect(names).toContain("browser_type");
     expect(names).toContain("browser_goto");
     expect(names).toContain("browser_wait_for");
+    expect(names).toContain("browser_eval");
+    expect(names).toContain("browser_network");
     expect(names).not.toContain("browser_wait");
   });
 
@@ -239,5 +241,34 @@ describe("MCP protocol", () => {
     expect((dup.result as { content: { text: string }[] }).content[0].text).toContain("已复制");
     const pin = await mcp("tools/call", { name: "browser_pin_tab", arguments: {} });
     expect((pin.result as { content: { text: string }[] }).content[0].text).toBe("已固定");
+  });
+
+  test("browser_eval 返回求值结果", async () => {
+    const resp = await mcp("tools/call", { name: "browser_eval", arguments: { code: "location.href" } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toContain("ok · string");
+    expect(text).toContain("mock-eval(location.href)");
+  });
+
+  test("browser_eval 拒绝空 code", async () => {
+    const resp = await mcp("tools/call", { name: "browser_eval", arguments: { code: "" } });
+    const result = resp.result as { isError?: boolean; content: { text: string }[] };
+    expect(result.isError).toBe(true);
+  });
+
+  test("browser_network list 返回请求记录", async () => {
+    const resp = await mcp("tools/call", { name: "browser_network", arguments: { include_body: true } });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toContain("缓冲区 1 条");
+    expect(text).toContain("POST https://example.com/mock/api → 200");
+    expect(text).toContain("authorization=«redacted»");
+    expect(text).toContain("resp-body: {\"ok\":true}");
+  });
+
+  test("browser_network install/clear 返回操作结果", async () => {
+    const inst = await mcp("tools/call", { name: "browser_network", arguments: { op: "install" } });
+    expect((inst.result as { content: { text: string }[] }).content[0].text).toContain("mock net install");
+    const clear = await mcp("tools/call", { name: "browser_network", arguments: { op: "clear" } });
+    expect((clear.result as { content: { text: string }[] }).content[0].text).toContain("mock net clear");
   });
 });

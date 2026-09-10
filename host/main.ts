@@ -15,7 +15,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { encodeFrame, FrameReader } from "./native-protocol";
 import { actionFromArgs, PRESS_KEYS, SCROLL_DIRS, BUTTONS, MODIFIERS } from "../shared/actions";
-import type { ExtractFormat, NativeRequest, NativeResponse, Snapshot } from "../shared/messages";
+import type { EvalWorld, ExtractFormat, NativeRequest, NativeResponse, NetworkReadView, Snapshot } from "../shared/messages";
 
 const START_PORT = Number(process.env.BROWSER_BRIDGE_PORT ?? 1234);
 // 端口文件路径可覆盖(测试/多实例场景避免互相污染)
@@ -156,6 +156,53 @@ function mockRespond(msg: FrameRequest): Promise<NativeResponse> {
       seq: msg.seq,
       ok: true,
       dataUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==", // mock 极小图片
+    });
+  }
+  if (msg.t === "reload-ext") {
+    return Promise.resolve({
+      t: "reload-result",
+      seq: msg.seq,
+      ok: true,
+      message: "mock 重载已触发",
+    });
+  }
+  if (msg.t === "eval") {
+    return Promise.resolve({
+      t: "eval-result",
+      seq: msg.seq,
+      ok: true,
+      value: JSON.stringify({ ok: true, type: "string", value: `mock-eval(${msg.code.slice(0, 20)})` }),
+    });
+  }
+  if (msg.t === "net") {
+    const snapshot: NetworkReadView = {
+      installed: true,
+      installedAt: 0,
+      total: 1,
+      dropped: 0,
+      nextId: 2,
+      entries: [
+        {
+          id: 1,
+          kind: "fetch",
+          method: "POST",
+          url: "https://example.com/mock/api",
+          status: 200,
+          ok: true,
+          durationMs: 12,
+          startTs: 0,
+          requestHeaders: { authorization: "«redacted»" },
+          ...(msg.includeBody ? { responseBody: '{"ok":true}' } : {}),
+        },
+      ],
+    };
+    return Promise.resolve({
+      t: "net-result",
+      seq: msg.seq,
+      ok: true,
+      op: msg.op ?? "list",
+      snapshot,
+      message: `mock net ${msg.op ?? "list"}`,
     });
   }
   return Promise.resolve({ t: "execute-result", seq: msg.seq, ok: true });
@@ -545,6 +592,131 @@ tool(
       if (resp.ok) return `已切换目标: ${resp.message ?? `tab ${args.tabId}`}`;
       return `失败: ${resp.message ?? "未知"}`;
     }
+    if (resp.t === "error") return `失败: ${resp.message}`;
+    return "失败: 扩展无响应";
+  },
+);
+
+// ---------- 页面内执行与网络抓包 ----------
+
+// 扩展回传的求值结果是 JSON 字符串(避免 structured clone 对 DOM/循环引用报错)
+function formatEvalResult(raw: string | undefined, error: string | undefined): string {
+  if (raw === undefined) return `失败: ${error ?? "扩展无响应"}`;
+  try {
+    const p = JSON.parse(raw) as { ok: boolean; type?: string; value?: unknown; error?: string; stack?: string };
+    if (!p.ok) {
+      const tail = p.stack ? `\n${p.stack.split("\n").slice(0, 4).join("\n")}` : "";
+      return `执行错误: ${p.error ?? "未知"}${tail}`;
+    }
+    const value = typeof p.value === "string" ? p.value : JSON.stringify(p.value, null, 2);
+    return `ok · ${p.type ?? "unknown"}\n${value ?? "undefined"}`;
+  } catch {
+    return raw;
+  }
+}
+
+// 单条请求的文本化;body 截断避免把上下文冲爆(扩展侧已封顶 20000 字符)
+const BODY_PREVIEW = 1200;
+function previewBody(s: string): string {
+  return s.length > BODY_PREVIEW ? `${s.slice(0, BODY_PREVIEW)}…(共 ${s.length} 字符,已截断)` : s;
+}
+
+function formatNetworkSnapshot(s: NetworkReadView): string {
+  if (!s.installed) return "钩子未安装:先调用 browser_network(op=install) 再操作页面,之后 op=list 查看";
+  const head = `缓冲区 ${s.total} 条${s.dropped ? `(已丢弃最旧 ${s.dropped} 条)` : ""};本次返回 ${s.entries.length} 条`;
+  if (s.entries.length === 0) return `${head}\n(无匹配记录)`;
+  const blocks = s.entries.map((e) => {
+    const status = e.status === null ? (e.error ? `失败(${e.error})` : "进行中") : String(e.status);
+    const dur = e.durationMs === null ? "" : ` ${e.durationMs}ms`;
+    const lines = [`#${e.id} [${e.kind}] ${e.method} ${e.url} → ${status}${dur}`];
+    if (e.requestHeaders && Object.keys(e.requestHeaders).length) {
+      lines.push(`  req-headers: ${Object.entries(e.requestHeaders).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+    }
+    if (e.requestBody) lines.push(`  req-body: ${previewBody(e.requestBody)}`);
+    if (e.responseHeaders && Object.keys(e.responseHeaders).length) {
+      lines.push(`  resp-headers: ${Object.entries(e.responseHeaders).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+    }
+    if (e.responseBody) lines.push(`  resp-body: ${previewBody(e.responseBody)}`);
+    if (e.note) lines.push(`  note: ${e.note}`);
+    return lines.join("\n");
+  });
+  return `${head}\n\n${blocks.join("\n\n")}`;
+}
+
+tool(
+  "browser_eval",
+  "在受控页面执行 JavaScript(默认 world=main:页面真实上下文,可读 localStorage/userToken、调用页面函数、改 DOM);结果为 JSON 化文本,超长自动截断",
+  {
+    code: z.string().min(1),
+    world: z.enum(["main", "isolated"]).optional(),
+    await: z.boolean().optional(),
+    timeout_ms: z.number().int().positive().max(30_000).optional(),
+  },
+  async (args) => {
+    const timeoutMs = Math.min(typeof args.timeout_ms === "number" ? args.timeout_ms : 5000, 30_000);
+    const resp = await sendToExtension(
+      {
+        t: "eval",
+        seq: ++seq,
+        code: args.code as string,
+        world: (args.world as EvalWorld | undefined) ?? "main",
+        awaitResult: args.await !== false,
+        timeoutMs,
+      },
+      timeoutMs + 5000,
+    );
+    if (resp.t === "eval-result") return formatEvalResult(resp.ok ? resp.value : undefined, resp.error);
+    if (resp.t === "error") return `失败: ${resp.message}`;
+    return "失败: 扩展无响应";
+  },
+);
+
+tool(
+  "browser_network",
+  "查看/管理受控页面的网络请求:op=list(默认)/install(装钩子)/clear;钩子装在页面里,fetch 与 XHR(含流式 SSE)都能记录;凭据类 header 默认打码,redact=false 可关闭;install 加 force=true 可强制重建(修钩子)",
+  {
+    op: z.enum(["list", "install", "clear"]).optional(),
+    force: z.boolean().optional(),
+    filter: z.string().optional(),
+    limit: z.number().int().positive().max(100).optional(),
+    include_body: z.boolean().optional(),
+    redact: z.boolean().optional(),
+    since_id: z.number().int().nonnegative().optional(),
+  },
+  async (args) => {
+    const op = (args.op as "list" | "install" | "clear" | undefined) ?? "list";
+    const resp = await sendToExtension(
+      {
+        t: "net",
+        seq: ++seq,
+        op,
+        ...(args.force === true ? { force: true } : {}),
+        ...(typeof args.filter === "string" ? { filter: args.filter } : {}),
+        ...(typeof args.limit === "number" ? { limit: args.limit } : {}),
+        includeBody: args.include_body === true,
+        redact: args.redact !== false,
+        ...(typeof args.since_id === "number" ? { sinceId: args.since_id } : {}),
+      },
+      20_000,
+    );
+    if (resp.t === "net-result") {
+      if (!resp.ok) return `失败: ${resp.message ?? "未知"}`;
+      if (op !== "list") return resp.message ?? "ok";
+      if (!resp.snapshot) return "失败: 未返回数据";
+      return formatNetworkSnapshot(resp.snapshot);
+    }
+    if (resp.t === "error") return `失败: ${resp.message}`;
+    return "失败: 扩展无响应";
+  },
+);
+
+tool(
+  "browser_reload_extension",
+  "重载 browser-bridge 扩展,使磁盘上的新代码生效(改完扩展文件后用);重载会断开 host,≤30s 后自动用新二进制重连",
+  {},
+  async () => {
+    const resp = await sendToExtension({ t: "reload-ext", seq: ++seq });
+    if (resp.t === "reload-result") return resp.ok ? (resp.message ?? "已触发重载") : `失败: ${resp.message ?? "未知"}`;
     if (resp.t === "error") return `失败: ${resp.message}`;
     return "失败: 扩展无响应";
   },
