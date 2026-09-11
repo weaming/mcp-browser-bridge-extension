@@ -5,7 +5,7 @@
 // 因此本文件里的辅助逻辑都写成函数内部定义。
 // (type-only import 会被构建擦除,不影响自包含性)
 
-import type { NetworkEntryView, NetworkReadView } from "../shared/messages";
+import type { NetworkEntryView, NetworkReadView, WebMcpCallView, WebMcpProbeView, WebMcpToolView } from "../shared/messages";
 
 // ---------- 页面内求值 ----------
 
@@ -510,4 +510,168 @@ export function clearNetwork(): { installed: boolean; cleared: number } {
   state.entries.length = 0;
   state.dropped = 0;
   return { installed: true, cleared: n };
+}
+
+// ---------- WebMCP(页面经 document.modelContext 注册的工具) ----------
+
+// 探测当前页面注册的 WebMCP 工具列表。按需注入的**纯只读**操作:
+// 只调 getTools() 做快照,不注册工具、不加监听器、不写任何页面全局状态。
+// 返回值 JSON 安全:RegisteredTool 里的 window/execute 不可序列化,丢弃;
+// 每个工具单独容错,一个坏 schema 不影响整个列表。
+export async function readWebMcpTools(): Promise<WebMcpProbeView> {
+  const sanitize = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+  const api =
+    typeof document !== "undefined" && (document as Record<string, unknown>).modelContext
+      ? "document.modelContext"
+      : typeof navigator !== "undefined" && (navigator as Record<string, unknown>).modelContext
+        ? "navigator.modelContext"
+        : "";
+  if (!api) {
+    return sanitize({
+      supported: false,
+      api: "",
+      tools: [],
+      error: "页面未暴露 WebMCP API(需要 Chrome 146+ 并开启 WebMCP DevTrial/flag,且页面注册过工具)",
+    });
+  }
+
+  const host =
+    typeof document !== "undefined" && (document as Record<string, unknown>).modelContext
+      ? document
+      : (navigator as unknown as Record<string, unknown>);
+  const mc = (host as unknown as { modelContext: { getTools: () => Promise<unknown[]> } }).modelContext;
+  try {
+    const raw = (await mc.getTools()) as Record<string, unknown>[];
+    const tools: WebMcpToolView[] = [];
+    for (const t of raw) {
+      try {
+        const view: WebMcpToolView = {
+          name: String(t.name),
+          description: String(t.description ?? ""),
+        };
+        if (typeof t.title === "string" && t.title) view.title = t.title;
+        if (t.inputSchema !== undefined && t.inputSchema !== null) {
+          // schema 可能含不可序列化结构,失败则丢弃该字段而不是丢掉整个工具;
+          // 有的实现/页面把 schema 存成 JSON 字符串,先尝试 parse 回对象
+          try {
+            let schema: unknown = t.inputSchema;
+            if (typeof schema === "string") schema = JSON.parse(schema);
+            view.inputSchema = JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
+          } catch {
+            /* 忽略不可解析的 schema */
+          }
+        }
+        const ann = t.annotations as Record<string, unknown> | undefined;
+        if (ann && typeof ann === "object") {
+          const hints: NonNullable<WebMcpToolView["annotations"]> = {};
+          if (ann.readOnlyHint === true) hints.readOnlyHint = true;
+          if (ann.untrustedContentHint === true) hints.untrustedContentHint = true;
+          if (ann.consequentialHint === true) hints.consequentialHint = true;
+          if (Object.keys(hints).length > 0) view.annotations = hints;
+        }
+        if (typeof t.origin === "string" && t.origin) view.origin = t.origin;
+        tools.push(view);
+      } catch (err) {
+        tools.push({ name: String((t as { name?: unknown })?.name ?? "(unnamed)"), description: `(工具信息读取失败: ${String(err)})` });
+      }
+    }
+    tools.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    return sanitize({ supported: true, api, tools });
+  } catch (err) {
+    return sanitize({
+      supported: true,
+      api,
+      tools: [],
+      error: `getTools() 失败: ${String((err as Error)?.message ?? err)}`,
+    });
+  }
+}
+
+// 调用页面注册的 WebMCP 工具。仍是按需注入:临时 getTools() 定位工具后
+// executeTool() 一次,不缓存工具引用、不残留任何状态。
+export async function callWebMcpTool(name: string, args: unknown, timeoutMs: number): Promise<WebMcpCallView> {
+  const sanitize = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+  const fail = (error: string, available?: string[]): WebMcpCallView =>
+    sanitize({ ok: false, name, error, ...(available ? { available } : {}) });
+
+  const mc = (typeof document !== "undefined" ? (document as Record<string, unknown>).modelContext : undefined) ??
+    (typeof navigator !== "undefined" ? (navigator as Record<string, unknown>).modelContext : undefined);
+  if (!mc) return fail("页面未暴露 WebMCP API(Chrome 146+ / flag)");
+
+  const ctx = mc as { getTools: () => Promise<unknown[]>; executeTool: (t: unknown, input?: unknown, opts?: unknown) => Promise<unknown> };
+  let tool: unknown;
+  try {
+    const tools = (await ctx.getTools()) as { name?: unknown }[];
+    tool = tools.find((t) => t?.name === name);
+    if (!tool) {
+      return fail(`页面未注册工具 "${name}"`, tools.map((t) => String(t?.name ?? "?")).sort());
+    }
+  } catch (err) {
+    return fail(`getTools() 失败: ${String((err as Error)?.message ?? err)}`);
+  }
+
+  const started = Date.now();
+  const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
+  // 不能只靠 executeTool 响应 AbortSignal —— 实现可能忽略 signal 挂死,
+  // 所以用 race 兜底保证本函数一定在 timeoutMs 后返回;abort 只是尽力协作取消。
+  let raceTimer: ReturnType<typeof setTimeout> | null = null;
+  const run = async (): Promise<unknown> => {
+    const input = (args ?? {}) as object;
+    try {
+      // Chrome DevTrial 实测签名:executeTool(tool, inputJsonString),绑定层负责 parse
+      return await ctx.executeTool(tool, JSON.stringify(input));
+    } catch (err) {
+      const msg = String((err as Error)?.message ?? err);
+      // 绑定层 parse 失败发生在工具执行前(无副作用),按草案签名(对象直传)重试
+      if (/parse input arguments/i.test(msg)) {
+        return await ctx.executeTool(tool, input, ac ? { signal: ac.signal } : undefined);
+      }
+      throw err;
+    }
+  };
+  try {
+    const result = await Promise.race([
+      run(),
+      new Promise<never>((_, reject) => {
+        raceTimer = setTimeout(() => {
+          ac?.abort();
+          reject(new Error(`执行超时(${timeoutMs}ms)`));
+        }, timeoutMs);
+      }),
+    ]) as unknown;
+    // 工具(或 Chrome 绑定)常把结果包成 MCP 风格 {content:[{type:"text",...}], isError?}
+    // 再整体字符串化:解出内层文本;isError:true 映射为 ok:false(工具级失败)
+    let resultStr = String(result);
+    let toolIsError = false;
+    try {
+      const parsed = JSON.parse(resultStr) as { content?: { text?: unknown }[]; isError?: unknown };
+      if (parsed && typeof parsed === "object" && Array.isArray(parsed.content)) {
+        const texts = parsed.content
+          .map((c) => (c && typeof c.text === "string" ? c.text : ""))
+          .filter((s) => s.length > 0);
+        if (texts.length > 0) {
+          resultStr = texts.join("\n");
+          toolIsError = parsed.isError === true;
+        }
+      }
+    } catch {
+      /* 非 JSON 结果,原样返回 */
+    }
+    return sanitize({
+      ok: !toolIsError,
+      name,
+      ...(toolIsError ? { error: resultStr } : { result: resultStr }),
+      durationMs: Date.now() - started,
+    });
+  } catch (err) {
+    return sanitize({
+      ok: false,
+      name,
+      error: `工具执行失败: ${String((err as Error)?.message ?? err)}`,
+      durationMs: Date.now() - started,
+    });
+  } finally {
+    if (raceTimer !== null) clearTimeout(raceTimer);
+  }
 }

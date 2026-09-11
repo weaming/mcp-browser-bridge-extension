@@ -84,6 +84,37 @@ export interface NetworkReadView {
   entries: NetworkEntryView[];
 }
 
+// ---------- WebMCP(W3C webmcp:页面经 document.modelContext 注册的工具) ----------
+
+export interface WebMcpToolView {
+  name: string;
+  title?: string;
+  description: string;
+  inputSchema?: Record<string, unknown>; // JSON Schema
+  annotations?: {
+    readOnlyHint?: boolean;
+    untrustedContentHint?: boolean;
+    consequentialHint?: boolean;
+  };
+  origin?: string; // 注册工具的文档来源(getTools 可返回跨 origin 的暴露工具)
+}
+
+export interface WebMcpProbeView {
+  supported: boolean; // 页面是否提供 modelContext API
+  api: string; // "document.modelContext" | "navigator.modelContext" | ""
+  tools: WebMcpToolView[];
+  error?: string; // API 存在但枚举失败(getTools 被拒等)时的原因
+}
+
+export interface WebMcpCallView {
+  ok: boolean;
+  name: string;
+  result?: string; // executeTool 的字符串化结果
+  durationMs?: number;
+  error?: string;
+  available?: string[]; // name 未命中时给出当前可调用的工具名
+}
+
 // ---------- 标签页信息 ----------
 
 export interface TabInfo {
@@ -122,6 +153,14 @@ export type NativeRequest =
       includeBody?: boolean;
       redact?: boolean;
       sinceId?: number;
+    }
+  | {
+      t: "webmcp";
+      seq: number;
+      op: "list" | "call";
+      name?: string; // call:要调用的工具名
+      args?: Record<string, unknown>; // call:工具入参(对象,匹配 inputSchema)
+      timeoutMs?: number; // call:执行超时
     }
   | { t: "ping" };
 
@@ -163,6 +202,15 @@ export type NativeResponse =
   | { t: "eval-result"; seq: number; ok: boolean; value?: string; error?: string }
   | { t: "reload-result"; seq: number; ok: boolean; message?: string }
   | { t: "net-result"; seq: number; ok: boolean; op: string; snapshot?: NetworkReadView; message?: string }
+  | {
+      t: "webmcp-result";
+      seq: number;
+      ok: boolean;
+      op: "list" | "call";
+      probe?: WebMcpProbeView; // op=list 的探测结果
+      result?: string; // op=call 的工具输出(字符串化)
+      message?: string; // 失败原因
+    }
   | { t: "pong" }
   | { t: "error"; seq: number; message: string };
 

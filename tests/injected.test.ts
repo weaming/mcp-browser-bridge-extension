@@ -3,7 +3,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import vm from "node:vm";
-import { clearNetwork, evalInPage, installNetworkHook, readNetwork } from "../extension/injected";
+import { callWebMcpTool, clearNetwork, evalInPage, installNetworkHook, readNetwork, readWebMcpTools } from "../extension/injected";
 
 const origFetch = globalThis.fetch;
 const HOOK_CFG = { maxEntries: 50, maxBody: 500 };
@@ -267,5 +267,201 @@ describe("页面内求值", () => {
     ) as { value: Record<string, unknown> };
     expect(r.value.self).toBe("[Circular]");
     expect(String(r.value.fn)).toContain("[Function");
+  });
+});
+
+describe("WebMCP 探测与调用", () => {
+  // 页面注入的模拟:document.modelContext 由页面(浏览器实现)提供,
+  // 测试里用普通对象模拟 getTools/executeTool 的最小表面。
+  // executeTool 模拟 Chrome 绑定层:收到 JSON 字符串先 parse 再传给 execute。
+  function shimModelContext(tools: unknown[]): void {
+    (globalThis as Record<string, unknown>).document = {
+      modelContext: {
+        getTools: async () => tools,
+        executeTool: async (tool: { __impl?: (input: unknown) => Promise<unknown> | unknown }, input?: unknown) => {
+          if (!tool || typeof (tool as { __impl?: unknown }).__impl !== "function") {
+            throw new Error("no impl");
+          }
+          const parsed = typeof input === "string" ? JSON.parse(input) : input;
+          return await tool.__impl!(parsed);
+        },
+      },
+    };
+  }
+  afterAll(() => {
+    delete (globalThis as Record<string, unknown>).document;
+  });
+
+  test("未暴露 modelContext 时 supported=false(bun 无 document)", async () => {
+    delete (globalThis as Record<string, unknown>).document;
+    const r = await readWebMcpTools();
+    expect(r.supported).toBe(false);
+    expect(r.api).toBe("");
+    expect(r.tools).toEqual([]);
+  });
+
+  test("getTools 结果映射为纯数据:丢弃 execute/window,保留 schema 与 hints", async () => {
+    shimModelContext([
+      {
+        name: "page_search",
+        title: "站内搜索",
+        description: "搜索商品",
+        inputSchema: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
+        annotations: { readOnlyHint: true, consequentialHint: false },
+        origin: "https://shop.test",
+        execute: () => "x",
+        window: {},
+      },
+    ]);
+    const r = await readWebMcpTools();
+    expect(r.supported).toBe(true);
+    expect(r.api).toBe("document.modelContext");
+    expect(r.tools.length).toBe(1);
+    const t = r.tools[0]!;
+    expect(t.name).toBe("page_search");
+    expect(t.title).toBe("站内搜索");
+    expect(t.inputSchema).toEqual({ type: "object", properties: { q: { type: "string" } }, required: ["q"] });
+    expect(t.annotations).toEqual({ readOnlyHint: true });
+    expect(t.origin).toBe("https://shop.test");
+    const json = JSON.stringify(r);
+    expect(json).not.toContain("execute"); // 函数与 window 不可出现在返回值里
+    expect(json).not.toContain("__impl");
+  });
+
+  test("单个工具 schema 不可序列化不影响其余工具;结果按名称排序", async () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    shimModelContext([
+      { name: "b_tool", description: "b" },
+      { name: "a_tool", description: "a", inputSchema: circular },
+    ]);
+    const r = await readWebMcpTools();
+    expect(r.tools.map((t) => t.name)).toEqual(["a_tool", "b_tool"]);
+    expect(r.tools[0]!.inputSchema).toBeUndefined();
+  });
+
+  test("字符串形态的 inputSchema 被归一化为对象", async () => {
+    shimModelContext([
+      {
+        name: "str_schema_tool",
+        description: "x",
+        inputSchema: '{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}',
+      },
+    ]);
+    const r = await readWebMcpTools();
+    expect(r.tools[0]!.inputSchema).toEqual({
+      type: "object",
+      properties: { q: { type: "string" } },
+      required: ["q"],
+    });
+  });
+
+  test("getTools 抛错时 supported=true 但 error 说明原因", async () => {
+    (globalThis as Record<string, unknown>).document = {
+      modelContext: { getTools: async () => { throw new Error("NotAllowedError: tools disabled"); } },
+    };
+    const r = await readWebMcpTools();
+    expect(r.supported).toBe(true);
+    expect(r.error).toContain("NotAllowedError");
+  });
+
+  test("callWebMcpTool 成功返回字符串化结果", async () => {
+    shimModelContext([
+      {
+        name: "page_echo",
+        description: "echo",
+        __impl: async (input: unknown) => `got:${JSON.stringify(input)}`,
+      },
+    ]);
+    const r = await callWebMcpTool("page_echo", { q: "hi" }, 1000);
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe('got:{"q":"hi"}');
+    expect(typeof r.durationMs).toBe("number");
+  });
+
+  test("callWebMcpTool 工具名未命中时报错并列出可用工具", async () => {
+    shimModelContext([{ name: "real_tool", description: "x" }]);
+    const r = await callWebMcpTool("nope", {}, 1000);
+    expect(r.ok).toBe(false);
+    expect(r.available).toEqual(["real_tool"]);
+  });
+
+  test("callWebMcpTool 执行抛错映射为 ok:false", async () => {
+    shimModelContext([
+      { name: "bad_tool", description: "x", __impl: async () => { throw new Error("boom"); } },
+    ]);
+    const r = await callWebMcpTool("bad_tool", {}, 1000);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("boom");
+  });
+
+  test("callWebMcpTool 超时中止", async () => {
+    shimModelContext([
+      { name: "slow_tool", description: "x", __impl: () => new Promise(() => {}) },
+    ]);
+    const r = await callWebMcpTool("slow_tool", {}, 50);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("超时");
+  });
+
+  test("字符串输入被拒时按草案签名(对象)重试", async () => {
+    (globalThis as Record<string, unknown>).document = {
+      modelContext: {
+        getTools: async () => [{ name: "draft_tool", description: "x", __impl: async (input: unknown) => `obj:${JSON.stringify(input)}` }],
+        executeTool: async (tool: { __impl?: unknown }, input?: unknown) => {
+          if (typeof input === "string") throw new Error("UnknownError: Failed to parse input arguments");
+          return await (tool as { __impl: (i: unknown) => Promise<unknown> }).__impl!(input);
+        },
+      },
+    };
+    const r = await callWebMcpTool("draft_tool", { q: "a" }, 1000);
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe('obj:{"q":"a"}');
+  });
+
+  test("content 包装的结果被解包为内层文本", async () => {
+    // Chrome 绑定会把工具返回的对象整体字符串化,模拟之
+    (globalThis as Record<string, unknown>).document = {
+      modelContext: {
+        getTools: async () => [{ name: "wrapped_tool", description: "x" }],
+        executeTool: async () => JSON.stringify({ content: [{ type: "text", text: '["flight1","flight2"]' }] }),
+      },
+    };
+    const r = await callWebMcpTool("wrapped_tool", {}, 1000);
+    expect(r.ok).toBe(true);
+    expect(r.result).toBe('["flight1","flight2"]');
+  });
+
+  test("isError:true 的包装结果映射为 ok:false", async () => {
+    (globalThis as Record<string, unknown>).document = {
+      modelContext: {
+        getTools: async () => [{ name: "err_tool", description: "x" }],
+        executeTool: async () =>
+          JSON.stringify({ content: [{ type: "text", text: "Timed out waiting for UI" }], isError: true }),
+      },
+    };
+    const r = await callWebMcpTool("err_tool", {}, 1000);
+    expect(r.ok).toBe(false);
+    expect(r.error).toBe("Timed out waiting for UI");
+  });
+
+  test("自包含:隔离沙箱里只靠页面全局即可工作", async () => {
+    const sandbox: Record<string, unknown> = { setTimeout, clearTimeout, AbortController, console };
+    sandbox.globalThis = sandbox;
+    const ctx = vm.createContext(sandbox) as Record<string, unknown>;
+    vm.runInContext(`globalThis.__probe = ${readWebMcpTools.toString()}`, ctx);
+    vm.runInContext(`globalThis.__call = ${callWebMcpTool.toString()}`, ctx);
+    ctx.document = {
+      modelContext: {
+        getTools: async () => [{ name: "s_tool", description: "d" }],
+        executeTool: async () => "sandbox-ok",
+      },
+    };
+    const probe = (await vm.runInContext("__probe()", ctx)) as { supported: boolean; tools: { name: string }[] };
+    expect(probe.supported).toBe(true);
+    expect(probe.tools[0]!.name).toBe("s_tool");
+    const call = (await vm.runInContext(`__call("s_tool", {}, 500)`, ctx)) as { ok: boolean; result?: string };
+    expect(call.ok).toBe(true);
+    expect(call.result).toBe("sandbox-ok");
   });
 });

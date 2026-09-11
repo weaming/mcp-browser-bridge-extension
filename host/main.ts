@@ -204,6 +204,43 @@ function mockRespond(msg: FrameRequest): Promise<NativeResponse> {
       message: `mock net ${msg.op ?? "list"}`,
     });
   }
+  if (msg.t === "webmcp") {
+    if (msg.op === "call") {
+      return Promise.resolve({
+        t: "webmcp-result",
+        seq: msg.seq,
+        ok: true,
+        op: "call",
+        result: `mock-result(${msg.name ?? "?"}): 查询参数 ${JSON.stringify(msg.args ?? {})}`,
+      });
+    }
+    return Promise.resolve({
+      t: "webmcp-result",
+      seq: msg.seq,
+      ok: true,
+      op: "list",
+      probe: {
+        supported: true,
+        api: "document.modelContext",
+        tools: [
+          {
+            name: "mock_search",
+            title: "站内搜索",
+            description: "mock 工具:在站点内搜索",
+            inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+            annotations: { readOnlyHint: true },
+            origin: "https://example.com",
+          },
+          {
+            name: "mock_add_to_cart",
+            description: "mock 工具:加入购物车",
+            inputSchema: { type: "object", properties: { sku: { type: "string" } }, required: ["sku"] },
+            annotations: { consequentialHint: true },
+          },
+        ],
+      },
+    });
+  }
   return Promise.resolve({ t: "execute-result", seq: msg.seq, ok: true });
 }
 
@@ -703,6 +740,51 @@ tool(
       if (op !== "list") return resp.message ?? "ok";
       if (!resp.snapshot) return "失败: 未返回数据";
       return formatNetworkSnapshot(resp.snapshot);
+    }
+    if (resp.t === "error") return `失败: ${resp.message}`;
+    return "失败: 扩展无响应";
+  },
+);
+
+tool(
+  "browser_webmcp_list",
+  "探测当前受控页面经 WebMCP(document.modelContext,W3C webmcp 规范)注册的工具:名称/标题/描述/参数 JSON Schema/annotations(hint 提示);按需注入只读脚本快照一次,不在页面注册任何东西、不留监听器。页面未暴露 API 时返回 supported:false(需 Chrome 146+ 开启 WebMCP)",
+  {},
+  async () => {
+    const resp = await sendToExtension({ t: "webmcp", seq: ++seq, op: "list" }, 15_000);
+    if (resp.t === "webmcp-result") {
+      if (!resp.ok || !resp.probe) return `失败: ${resp.message ?? "未返回数据"}`;
+      return JSON.stringify(resp.probe);
+    }
+    if (resp.t === "error") return `失败: ${resp.message}`;
+    return "失败: 扩展无响应";
+  },
+);
+
+tool(
+  "browser_webmcp_call",
+  "调用当前受控页面经 WebMCP 注册的工具:先用 browser_webmcp_list 拿工具名与 inputSchema,再按 schema 传 args;返回工具的字符串化执行结果",
+  {
+    name: z.string().min(1),
+    args: z.record(z.string(), z.unknown()).optional(),
+    timeout_ms: z.number().int().positive().max(30_000).optional(),
+  },
+  async (args) => {
+    const timeoutMs = Math.min(typeof args.timeout_ms === "number" ? args.timeout_ms : 15_000, 30_000);
+    const resp = await sendToExtension(
+      {
+        t: "webmcp",
+        seq: ++seq,
+        op: "call",
+        name: args.name as string,
+        ...(args.args !== undefined ? { args: args.args as Record<string, unknown> } : {}),
+        timeoutMs,
+      },
+      timeoutMs + 5000,
+    );
+    if (resp.t === "webmcp-result") {
+      if (resp.ok && resp.result !== undefined) return resp.result;
+      return `失败: ${resp.message ?? "工具执行失败"}`;
     }
     if (resp.t === "error") return `失败: ${resp.message}`;
     return "失败: 扩展无响应";

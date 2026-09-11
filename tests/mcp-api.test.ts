@@ -124,6 +124,8 @@ describe("MCP protocol", () => {
     expect(names).toContain("browser_wait_for");
     expect(names).toContain("browser_eval");
     expect(names).toContain("browser_network");
+    expect(names).toContain("browser_webmcp_list");
+    expect(names).toContain("browser_webmcp_call");
     expect(names).not.toContain("browser_wait");
   });
 
@@ -295,5 +297,30 @@ describe("MCP protocol", () => {
     expect((inst.result as { content: { text: string }[] }).content[0].text).toContain("mock net install");
     const clear = await mcp("tools/call", { name: "browser_network", arguments: { op: "clear" } });
     expect((clear.result as { content: { text: string }[] }).content[0].text).toContain("mock net clear");
+  });
+
+  test("browser_webmcp_list 返回工具列表与参数 schema", async () => {
+    const resp = await mcp("tools/call", { name: "browser_webmcp_list", arguments: {} });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    const probe = JSON.parse(text) as {
+      supported: boolean;
+      api: string;
+      tools: { name: string; inputSchema?: { required?: string[] }; annotations?: Record<string, boolean> }[];
+    };
+    expect(probe.supported).toBe(true);
+    expect(probe.api).toBe("document.modelContext");
+    const search = probe.tools.find((t) => t.name === "mock_search");
+    expect(search?.inputSchema?.required).toEqual(["query"]);
+    expect(search?.annotations).toEqual({ readOnlyHint: true });
+  });
+
+  test("browser_webmcp_call 调用页面工具返回结果", async () => {
+    const resp = await mcp("tools/call", {
+      name: "browser_webmcp_call",
+      arguments: { name: "mock_search", args: { query: "socks" } },
+    });
+    const text = (resp.result as { content: { text: string }[] }).content[0].text;
+    expect(text).toContain("mock-result(mock_search)");
+    expect(text).toContain('"query":"socks"');
   });
 });

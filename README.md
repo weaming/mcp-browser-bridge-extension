@@ -93,6 +93,8 @@ url = "http://127.0.0.1:1234/mcp"
 | `browser_wait_for` | `ms` 或 `selector` 或 `text`(三选一,不可组合) | 等待:定时(ms≤60s),或等元素出现,或等页面文本出现(UI 条件最多 5s) |
 | `browser_eval` | `code`, `world?`(main\|isolated), `await?`, `timeout_ms?` | 在页面执行 JS(默认 main=真实页面上下文,可读 localStorage/页面变量、改 DOM);结果 JSON 化返回,循环引用/函数/DOM 都能安全序列化 |
 | `browser_network` | `op?`(list\|install\|clear), `filter?`, `limit?`, `include_body?`, `redact?`, `since_id?` | 查看页面真实网络请求。`install` 装一次钩子后,fetch/XHR 全部记录(含流式 SSE 响应体);默认对 authorization/cookie/api-key 等 header 打码 |
+| `browser_webmcp_list` | — | 探测当前页面经 WebMCP(`document.modelContext`,W3C webmcp)注册的工具:名称/描述/参数 JSON Schema/annotations。按需注入只读脚本快照一次,不注册、不留监听器;页面未暴露 API(需 Chrome 146+ 开启 WebMCP)时返回 `supported:false` |
+| `browser_webmcp_call` | `name`, `args?`, `timeout_ms?` | 调用页面注册的 WebMCP 工具,返回字符串化执行结果;先 `browser_webmcp_list` 拿 name 与 inputSchema |
 | `browser_reload_extension` | — | 重载扩展使磁盘上的新代码生效(改完扩展文件后用,≤30s 自动重连) |
 
 AI 自行编排:snapshot → 决策 → 操作 → 再 snapshot,直到任务完成。

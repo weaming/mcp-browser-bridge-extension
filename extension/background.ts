@@ -10,8 +10,9 @@ import type {
   NativeResponse,
   PopupRequest,
   PopupResponse,
+  WebMcpProbeView,
 } from "../shared/messages";
-import { clearNetwork, evalInPage, installNetworkHook, readNetwork } from "./injected";
+import { callWebMcpTool, clearNetwork, evalInPage, installNetworkHook, readNetwork, readWebMcpTools } from "./injected";
 
 const HOST_NAME = "com.browserbridge";
 
@@ -313,6 +314,35 @@ async function handleNative(msg: NativeRequest): Promise<void> {
       ok: out.ok,
       value: out.ok ? (typeof out.value === "string" ? out.value : JSON.stringify(out.value)) : undefined,
       error: out.error,
+    } satisfies NativeResponse);
+    return;
+  }
+  if (msg.t === "webmcp") {
+    const tabId = await requireTarget(msg.seq);
+    if (tabId === null) return;
+    if (msg.op === "call") {
+      // 工具可能在页面里等用户输入,给足默认 15s,上限 30s
+      const timeoutMs = Math.min(Math.max(msg.timeoutMs ?? 15_000, 1), 30_000);
+      const out = await runInPage(tabId, "MAIN", callWebMcpTool, [msg.name ?? "", msg.args ?? {}, timeoutMs]);
+      const call = out.ok ? (out.value as { ok?: boolean; result?: string; error?: string } | undefined) : undefined;
+      port?.postMessage({
+        t: "webmcp-result",
+        seq: msg.seq,
+        ok: out.ok && call?.ok === true,
+        op: "call",
+        result: call?.result,
+        message: out.ok ? call?.error : out.error,
+      } satisfies NativeResponse);
+      return;
+    }
+    const out = await runInPage(tabId, "MAIN", readWebMcpTools, []);
+    port?.postMessage({
+      t: "webmcp-result",
+      seq: msg.seq,
+      ok: out.ok,
+      op: "list",
+      probe: out.ok ? (out.value as WebMcpProbeView) : undefined,
+      message: out.ok ? undefined : out.error,
     } satisfies NativeResponse);
     return;
   }
