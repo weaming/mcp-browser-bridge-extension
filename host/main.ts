@@ -1,18 +1,17 @@
 // browser-bridge host:唯一进程,两个角色:
 // 1. native messaging host(stdin/stdout 帧协议)—— 与 Chrome 扩展通信
-// 2. MCP server(Streamable HTTP,127.0.0.1:8790)—— 对 AI/程序暴露浏览器控制工具
+// 2. MCP server(Streamable HTTP,127.0.0.1:1234 起)—— 对 AI/程序暴露浏览器控制工具
+//    SDK v2 双协议:modern 2026-07-28(server/discover 协商)+ legacy 2025 系列(无状态)
 // 工具调用 → 帧请求 → 扩展执行 → 结果转 MCP 响应。
 // BROWSER_BRIDGE_MOCK=1 时帧请求由内部模拟应答(无扩展也能测 MCP API)。
 
-import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import { zodToJsonSchema } from "zod-to-json-schema";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { encodeFrame, FrameReader } from "./native-protocol";
 import { actionFromArgs, PRESS_KEYS, SCROLL_DIRS, BUTTONS, MODIFIERS } from "../shared/actions";
 import type { EvalWorld, ExtractFormat, NativeRequest, NativeResponse, NetworkReadView, Snapshot } from "../shared/messages";
@@ -291,7 +290,7 @@ type ToolOutput = string | ToolContentItem[];
 
 interface ToolDef {
   description: string;
-  schema: z.ZodRawShape; // 普通对象 shape,SDK tool() 原生支持
+  schema: z.ZodRawShape; // 普通对象 shape,注册时包成 z.object 传给 SDK
   handler: (args: Record<string, unknown>) => Promise<ToolOutput>;
 }
 
@@ -722,17 +721,18 @@ tool(
   },
 );
 
-// ---------- MCP server(会话模式) ----------
+// ---------- MCP server ----------
 
-// SDK 的 Server 实例只能 connect 一次,每个 MCP session 创建独立实例。
+// HTTP 入口按请求创建实例(无状态),工具定义共享只读 TOOLS。
 function createMcpServer(): McpServer {
   const mcp = new McpServer({ name: "browser-bridge", version: "0.1.1" });
   for (const [name, def] of TOOLS) {
     // SDK 泛型重载无法从动态 schema/handler 推断,用 any 逃逸
-    (mcp as unknown as { tool: (n: string, d: string, s: unknown, cb: (a: Record<string, unknown>) => unknown) => unknown }).tool(
+    (mcp as unknown as {
+      registerTool: (n: string, cfg: Record<string, unknown>, cb: (a: Record<string, unknown>) => unknown) => unknown;
+    }).registerTool(
       name,
-      def.description,
-      def.schema,
+      { description: def.description, inputSchema: z.object(def.schema) },
       async (args: Record<string, unknown>) => ({
         content: toContent(await def.handler(args)),
       }),
@@ -741,95 +741,13 @@ function createMcpServer(): McpServer {
   return mcp;
 }
 
-// ---------- 无状态模式(2026-07-28 规范:跳过握手直接调用) ----------
+// ---------- Streamable HTTP serving(v2 双协议时代) ----------
 
-async function handleStateless(body: Record<string, unknown> | undefined, res: ServerResponse): Promise<void> {
-  const id = body?.id ?? null;
-  const reply = (payload: Record<string, unknown> | undefined, status = 200): void => {
-    res.statusCode = status;
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ jsonrpc: "2.0", id, ...(payload ?? {}) }));
-  };
-  const fail = (code: number, message: string): void =>
-    reply({ error: { code, message } });
-
-  if (!body || body.method === undefined) {
-    return fail(-32700, "Parse error: Invalid JSON-RPC message");
-  }
-  if (body.method === "tools/list") {
-    const tools = [...TOOLS.entries()].map(([name, def]) => ({
-      name,
-      description: def.description,
-      inputSchema: zodToJsonSchema(z.object(def.schema) as never, { target: "openAi" }),
-    }));
-    return reply({ result: { tools } });
-  }
-  if (body.method === "tools/call") {
-    const params = (body.params ?? {}) as { name?: unknown; arguments?: unknown };
-    const def = typeof params.name === "string" ? TOOLS.get(params.name) : undefined;
-    if (!def) return fail(-32602, `Unknown tool: ${String(params.name)}`);
-    const parsed = z.object(def.schema).safeParse(params.arguments ?? {});
-    if (!parsed.success) return fail(-32602, `Invalid arguments: ${parsed.error.message}`);
-    try {
-      const out = await def.handler(parsed.data as Record<string, unknown>);
-      return reply({ result: { content: toContent(out) } });
-    } catch (err) {
-      return fail(-32000, String(err));
-    }
-  }
-  // 其他请求/通知:无内容响应
-  return reply({}, 202);
-}
-
-// ---------- Streamable HTTP transport ----------
-
-interface McpSession {
-  transport: StreamableHTTPServerTransport;
-  server: McpServer;
-  lastUsed: number;
-}
-
-const sessions = new Map<string, McpSession>();
-
-// 会话过期清理:1 小时未活动的 session 关闭,防长跑泄漏
-const SESSION_TTL_MS = 3600_000;
-setInterval(() => {
-  const now = Date.now();
-  for (const [sid, s] of sessions) {
-    if (now - s.lastUsed > SESSION_TTL_MS) {
-      s.transport.close();
-      s.server.close();
-      sessions.delete(sid);
-    }
-  }
-}, 300_000).unref?.();
-
-const MAX_BODY_BYTES = 5 * 1024 * 1024;
-
-function readBody(req: IncomingMessage): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    req.on("data", (c: Buffer) => {
-      total += c.length;
-      if (total > MAX_BODY_BYTES) {
-        reject(new Error(`request body too large (>${MAX_BODY_BYTES})`));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on("end", () => {
-      const text = Buffer.concat(chunks).toString("utf8");
-      try {
-        resolve(text ? JSON.parse(text) : undefined);
-      } catch (err) {
-        reject(new Error(`bad json body: ${String(err)}`));
-      }
-    });
-    req.on("error", reject);
-  });
-}
+// createMcpHandler 同时服务两个协议版本:
+// - modern(2026-07-28):响应 server/discover 协商探测,报告 supportedVersions;
+// - legacy(2025 系列,默认 stateless):老客户端的 plain initialize 直接可用。
+// 之前手写的无 session 短路应答会把探测请求吞成空 202,导致 ZCode 版本协商 5s 超时。
+const mcpNodeHandler = toNodeHandler(createMcpHandler(() => createMcpServer()));
 
 // ---------- 端口自愈监听 ----------
 // 从初始端口(默认 1234)开始探测,被占则 +1,最多试 20 个;
@@ -843,34 +761,7 @@ const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     return;
   }
   try {
-    const body = await readBody(req);
-    const method = (body as { method?: string } | null)?.method;
-    const sessionId =
-      (req.headers["mcp-session-id"] as string | undefined) ?? url.searchParams.get("session_id") ?? undefined;
-
-    // 无 session 且非 initialize:2026-07-28 规范的无状态调用
-    // (跳过握手,直接 tools/list / tools/call),由 host 自带处理器应答
-    if (!sessionId && method !== "initialize") {
-      await handleStateless(body as Record<string, unknown> | undefined, res);
-      return;
-    }
-
-    let session = sessionId ? sessions.get(sessionId) : undefined;
-    if (!session) {
-      const server = createMcpServer();
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        // sessionId 在收到 initialize 请求时生成,通过回调注册
-        onsessioninitialized: (sid) => {
-          sessions.set(sid, { transport, server, lastUsed: Date.now() });
-          transport.onclose = () => sessions.delete(sid);
-        },
-      });
-      await server.connect(transport);
-      session = { transport, server, lastUsed: Date.now() };
-    }
-    session.lastUsed = Date.now();
-    await session.transport.handleRequest(req, res, body);
+    await mcpNodeHandler(req, res);
   } catch (err) {
     console.error(`mcp http error: ${String(err)}`);
     if (!res.headersSent) {

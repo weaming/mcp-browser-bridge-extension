@@ -9,7 +9,6 @@ const PORT = 8792;
 const BASE = `http://127.0.0.1:${PORT}/mcp`;
 
 let proc: ReturnType<typeof Bun.spawn>;
-let sessionId: string | null = null;
 let nextId = 1;
 
 async function mcp(method: string, params?: unknown): Promise<Record<string, unknown>> {
@@ -20,12 +19,9 @@ async function mcp(method: string, params?: unknown): Promise<Record<string, unk
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
-      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
     },
     body: JSON.stringify(body),
   });
-  const sid = res.headers.get("mcp-session-id");
-  if (sid) sessionId = sid;
   expect(res.status).toBe(200);
   const text = await res.text();
   // SDK 按 Accept 返回 SSE 流;取首个 data 行解析
@@ -63,26 +59,55 @@ afterAll(() => {
 });
 
 describe("MCP protocol", () => {
-  test("initialize 握手", async () => {
+  test("initialize 握手(legacy 2025 系列,无状态)", async () => {
     const resp = await mcp("initialize", {
       protocolVersion: "2025-06-18",
       capabilities: {},
       clientInfo: { name: "mcp-api-test", version: "0.1.1" },
     });
-    expect(resp).toHaveProperty("result");
-    expect((resp.result as { serverInfo: { name: string } }).serverInfo.name).toBe("browser-bridge");
-    expect(sessionId).toBeTruthy();
+    const result = resp.result as { serverInfo: { name: string }; protocolVersion: string };
+    expect(result.serverInfo.name).toBe("browser-bridge");
+    // 无状态服务不派发 session id,客户端支持的版本被原样回显
+    expect(result.protocolVersion).toBe("2025-06-18");
+  });
+
+  test("server/discover 协商探测(modern 2026-07-28)", async () => {
+    // ZCode 等新客户端连接前先发 server/discover 探测,要求报告 supportedVersions;
+    // modern 请求按 2026-07-28 HTTP 绑定携带 Mcp-Method 头与 _meta envelope
+    const res = await fetch(BASE, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "server/discover",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: nextId++,
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "mcp-api-test", version: "0.1.1" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const dataLine = text.split("\n").find((l) => l.startsWith("data: "));
+    const resp = JSON.parse(dataLine ? dataLine.slice(6) : text) as { result?: { supportedVersions?: string[] } };
+    expect(resp.result?.supportedVersions).toContain("2026-07-28");
   });
 
   test("notifications/initialized 后 tools/list", async () => {
-    expect(sessionId).toBeTruthy(); // 上一步 initialize 已建立会话
-
     const notif = await fetch(BASE, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        "mcp-session-id": sessionId!,
       },
       body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
     });
@@ -129,7 +154,7 @@ describe("MCP protocol", () => {
     const result = resp.result as { isError?: boolean; content: { text: string }[] };
     expect(result.isError).toBe(true);
     const text = result.content.map((c) => c.text).join("\n");
-    expect(text).toContain("MCP error");
+    expect(text).toContain("Invalid arguments");
   });
 
   test("browser_goto 拒绝非 http url", async () => {
