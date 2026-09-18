@@ -376,9 +376,11 @@ tool(
     const resp = await sendToExtension({ t: "extract", seq: ++seq, format: args.format as ExtractFormat | undefined }, 30_000);
     if (resp.t === "extract-result") {
       if (!resp.ok) return `提取失败: ${resp.message ?? "未知"}`;
-      const head = [`URL: ${resp.url ?? ""}`, `标题: ${resp.title ?? ""}`];
+      const url = resp.url ?? "";
+      const title = (resp.title ?? "").replace(/[\r\n]+/g, " ").trim();
+      const head = [`**URL:** [${url}](${url})`, `**标题:** ${title}`];
       if (resp.fallback) head.push("(非文章型页面,以下为整页转换结果)");
-      return `${head.join("\n")}\n\n${resp.content ?? ""}`;
+      return `${head.join("\n\n")}\n\n${resp.content ?? ""}`;
     }
     if (resp.t === "error") return `提取失败: ${resp.message}`;
     return "提取失败: 扩展无响应";

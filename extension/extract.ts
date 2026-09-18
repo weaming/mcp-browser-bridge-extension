@@ -72,6 +72,33 @@ function normalizeEditorBlocks(doc: Document): void {
   }
 }
 
+// 部分文档的目录会生成只有子列表、没有文本的空 li,转换后会多出一个无意义的列表标记。
+function unwrapEmptyListItems(doc: Document): void {
+  for (const li of [...doc.querySelectorAll<HTMLLIElement>("li")]) {
+    const childLists = [...li.children].filter(
+      (child): child is HTMLUListElement | HTMLOListElement => child.tagName === "UL" || child.tagName === "OL",
+    );
+    const hasDirectText = [...li.childNodes]
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .some((node) => (node.textContent ?? "").trim());
+
+    if (li.children.length === 1 && childLists.length === 1 && !hasDirectText) {
+      li.replaceWith(childLists[0]);
+    }
+  }
+}
+
+export interface HeadingAnchor {
+  id: string;
+  text: string;
+}
+
+function collectHeadingAnchors(doc: Document): HeadingAnchor[] {
+  return [...doc.querySelectorAll<HTMLHeadingElement>("h1[id], h2[id], h3[id], h4[id], h5[id], h6[id]")]
+    .map((heading) => ({ id: heading.id, text: heading.textContent?.replace(/\s+/g, " ").trim() ?? "" }))
+    .filter((heading) => heading.id && heading.text);
+}
+
 function blockLines(el: HTMLElement): HTMLElement[] {
   return [...el.children].filter((c): c is HTMLElement => LINE_BLOCK_TAG.test(c.tagName));
 }
@@ -199,6 +226,76 @@ function cleanAnswerMd(md: string): string {
     .trim();
 }
 
+// Turndown 默认在列表标记后填充三个空格,统一成更紧凑且更易渲染的 Markdown。
+export function normalizeMarkdown(md: string): string {
+  const lines = md.split("\n");
+  let inFence = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = /^\s*```/.test(line);
+    if (!inFence) {
+      lines[i] = line.trim() === "" ? "" : line.replace(/^(\s*)([-*+]|\d{1,9}[.)])\s+/, "$1$2 ");
+    }
+    if (fence) inFence = !inFence;
+  }
+
+  const out: string[] = [];
+  inFence = false;
+  for (const line of collapseListBlanks(lines)) {
+    const fence = /^\s*```/.test(line);
+    if (!inFence && line === "" && out.at(-1) === "") continue;
+    out.push(line);
+    if (fence) inFence = !inFence;
+  }
+  return out.join("\n");
+}
+
+function comparableHeadingText(text: string): string {
+  return text
+    .replace(/\\([\\`*_{}\[\]()#+.!-])/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[`*_~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeHtmlAttr(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Markdown 标题不会保留原 HTML 的 id,在标题前补一个相对页面可跳转的 HTML 锚点。
+export function addHeadingAnchors(md: string, anchors: HeadingAnchor[]): string {
+  if (anchors.length === 0) return md;
+
+  const lines = md.split("\n");
+  const out: string[] = [];
+  let anchorIndex = 0;
+  let inFence = false;
+
+  for (const line of lines) {
+    const fence = /^\s*```/.test(line);
+    if (!inFence) {
+      const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+      if (match) {
+        const headingText = comparableHeadingText(match[2]);
+        const nextAnchorIndex = anchors.slice(anchorIndex).findIndex(
+          (anchor) => comparableHeadingText(anchor.text) === headingText,
+        );
+        if (nextAnchorIndex >= 0) {
+          const anchor = anchors[anchorIndex + nextAnchorIndex];
+          out.push(`<a id="${escapeHtmlAttr(anchor.id)}"></a>`);
+          anchorIndex += nextAnchorIndex + 1;
+        }
+      }
+    }
+    out.push(line);
+    if (fence) inFence = !inFence;
+  }
+
+  return out.join("\n");
+}
+
 function cleanLines(md: string): string[] {
   const lines = md.split("\n");
   let inFence = false;
@@ -257,12 +354,16 @@ export function buildExtract(format: ExtractFormat = "markdown"): ContentRespons
   if (chat) return chat;
   const doc = document.cloneNode(true) as Document;
   normalizeEditorBlocks(doc);
+  unwrapEmptyListItems(doc);
+  const headingAnchors = collectHeadingAnchors(doc);
   try {
     const article = extract(doc, { format });
-    return okResult(article.content.slice(0, MAX_EXTRACT_CHARS), { title: article.title });
+    const content =
+      format === "markdown" ? addHeadingAnchors(normalizeMarkdown(article.content), headingAnchors) : article.content;
+    return okResult(content.slice(0, MAX_EXTRACT_CHARS), { title: article.title });
   } catch {
     // 非文章型页面(SPA/列表页)Readability 提取失败,回退整页 body 转 Markdown
-    const md = htmlToMarkdown(document.body?.innerHTML ?? "");
-    return okResult(md.slice(0, MAX_EXTRACT_CHARS), { fallback: true });
+    const md = normalizeMarkdown(htmlToMarkdown(document.body?.innerHTML ?? ""));
+    return okResult(addHeadingAnchors(md, headingAnchors).slice(0, MAX_EXTRACT_CHARS), { fallback: true });
   }
 }

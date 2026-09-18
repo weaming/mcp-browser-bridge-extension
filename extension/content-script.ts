@@ -128,12 +128,25 @@ function buildSnapshot(): Snapshot {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-async function doClick(el: HTMLElement): Promise<void> {
+async function doClick(el: HTMLElement, button: "left" | "right" | "middle" = "left"): Promise<void> {
   el.scrollIntoView({ block: "center", behavior: "smooth" });
   await sleep(100);
   el.focus();
-  for (const type of ["mousedown", "mouseup", "click"] as const) {
-    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0 }));
+  const buttonCode = button === "left" ? 0 : button === "middle" ? 1 : 2;
+  for (const type of ["mousedown", "mouseup"] as const) {
+    el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: buttonCode }));
+  }
+  if (button === "left") {
+    // dispatchEvent 不会可靠触发 a[href] 的默认导航,HTMLElement.click() 会执行原生激活行为。
+    el.click();
+  } else {
+    el.dispatchEvent(
+      new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+        button: buttonCode,
+      }),
+    );
   }
 }
 
@@ -333,7 +346,7 @@ async function execute(action: Action): Promise<ContentResponse> {
 
     switch (action.action) {
       case "click":
-        await doClick(el);
+        await doClick(el, action.button);
         break;
       case "type":
         await doType(el, action.text, action.clear === true);

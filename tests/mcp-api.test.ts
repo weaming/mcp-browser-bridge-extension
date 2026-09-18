@@ -141,7 +141,7 @@ describe("MCP protocol", () => {
   test("browser_extract 返回正文 Markdown", async () => {
     const resp = await mcp("tools/call", { name: "browser_extract", arguments: {} });
     const text = (resp.result as { content: { type: string; text: string }[] }).content[0].text;
-    expect(text).toContain("标题: Mock Page");
+    expect(text).toContain("**标题:** Mock Page");
     expect(text).toContain("mock 的正文 Markdown 内容");
   });
 
