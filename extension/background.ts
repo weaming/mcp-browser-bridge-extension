@@ -452,13 +452,19 @@ async function handleNative(msg: NativeRequest): Promise<void> {
       fallback: contentResp.fallback,
       message: contentResp.message,
     } satisfies NativeResponse);
-  } else {
+  } else if (contentResp.kind === "execute-result") {
     port?.postMessage({
       t: "execute-result",
       seq: contentResp.seq,
       ok: contentResp.ok,
       code: contentResp.code,
       detail: contentResp.detail,
+    } satisfies NativeResponse);
+  } else {
+    port?.postMessage({
+      t: "error",
+      seq: msg.seq,
+      message: `目标标签页返回了不匹配的响应: ${contentResp.kind}`,
     } satisfies NativeResponse);
   }
 }

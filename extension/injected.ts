@@ -520,11 +520,15 @@ export function clearNetwork(): { installed: boolean; cleared: number } {
 // 每个工具单独容错,一个坏 schema 不影响整个列表。
 export async function readWebMcpTools(): Promise<WebMcpProbeView> {
   const sanitize = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+  const documentModelContext =
+    typeof document !== "undefined" ? (document as unknown as { modelContext?: unknown }).modelContext : undefined;
+  const navigatorModelContext =
+    typeof navigator !== "undefined" ? (navigator as unknown as { modelContext?: unknown }).modelContext : undefined;
 
   const api =
-    typeof document !== "undefined" && (document as Record<string, unknown>).modelContext
+    documentModelContext
       ? "document.modelContext"
-      : typeof navigator !== "undefined" && (navigator as Record<string, unknown>).modelContext
+      : navigatorModelContext
         ? "navigator.modelContext"
         : "";
   if (!api) {
@@ -536,11 +540,7 @@ export async function readWebMcpTools(): Promise<WebMcpProbeView> {
     });
   }
 
-  const host =
-    typeof document !== "undefined" && (document as Record<string, unknown>).modelContext
-      ? document
-      : (navigator as unknown as Record<string, unknown>);
-  const mc = (host as unknown as { modelContext: { getTools: () => Promise<unknown[]> } }).modelContext;
+  const mc = (documentModelContext ?? navigatorModelContext) as { getTools: () => Promise<unknown[]> };
   try {
     const raw = (await mc.getTools()) as Record<string, unknown>[];
     const tools: WebMcpToolView[] = [];
@@ -595,8 +595,9 @@ export async function callWebMcpTool(name: string, args: unknown, timeoutMs: num
   const fail = (error: string, available?: string[]): WebMcpCallView =>
     sanitize({ ok: false, name, error, ...(available ? { available } : {}) });
 
-  const mc = (typeof document !== "undefined" ? (document as Record<string, unknown>).modelContext : undefined) ??
-    (typeof navigator !== "undefined" ? (navigator as Record<string, unknown>).modelContext : undefined);
+  const mc =
+    (typeof document !== "undefined" ? (document as unknown as { modelContext?: unknown }).modelContext : undefined) ??
+    (typeof navigator !== "undefined" ? (navigator as unknown as { modelContext?: unknown }).modelContext : undefined);
   if (!mc) return fail("页面未暴露 WebMCP API(Chrome 146+ / flag)");
 
   const ctx = mc as { getTools: () => Promise<unknown[]>; executeTool: (t: unknown, input?: unknown, opts?: unknown) => Promise<unknown> };
