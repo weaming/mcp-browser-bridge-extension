@@ -518,7 +518,36 @@ async function requireTarget(seq: number): Promise<number | null> {
   return tabId;
 }
 
-// ---------- 截图(captureVisibleTab → OffscreenCanvas 压缩 JPEG) ----------
+// 截图编码上限要为 base64 和 native messaging 的 JSON 开销留出空间。
+const SCREENSHOT_MAX_BYTES = 700 * 1024;
+const SCREENSHOT_QUALITIES = [0.88, 0.82, 0.76, 0.7, 0.64, 0.58, 0.5, 0.42, 0.35, 0.28] as const;
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("blob 转 dataURL 失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function encodeScreenshot(bitmap: ImageBitmap): Promise<string> {
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("无法创建截图画布");
+
+  ctx.drawImage(bitmap, 0, 0);
+
+  const lossless = await canvas.convertToBlob({ type: "image/png" });
+  if (lossless.size <= SCREENSHOT_MAX_BYTES) return await blobToDataUrl(lossless);
+
+  for (const quality of SCREENSHOT_QUALITIES) {
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
+    if (blob.size <= SCREENSHOT_MAX_BYTES) return await blobToDataUrl(blob);
+  }
+
+  throw new Error(`保持原始像素后截图仍超过 ${Math.round(SCREENSHOT_MAX_BYTES / 1024)}KB`);
+}
 
 async function captureScreenshot(): Promise<{ ok: boolean; dataUrl?: string; message?: string }> {
   const tabId = await resolveTargetTabId();
@@ -527,24 +556,15 @@ async function captureScreenshot(): Promise<{ ok: boolean; dataUrl?: string; mes
   await chrome.tabs.update(tabId, { active: true }).catch(() => {});
   const png = await (chrome.tabs.captureVisibleTab as unknown as (opts: { format: string }) => Promise<string>)({ format: "png" }).catch(() => null);
   if (!png) return { ok: false, message: "截图失败(页面不可见?)" };
+  let bitmap: ImageBitmap | null = null;
   try {
-    // 压缩:缩放宽 1280 + JPEG 0.7,控制在 1MB 帧上限内
     const blob = await (await fetch(png)).blob();
-    const bitmap = await createImageBitmap(blob);
-    const scale = Math.min(1, 1280 / bitmap.width);
-    const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale));
-    const ctx = canvas.getContext("2d")!;
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    const out = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.7 });
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onload = () => resolve(fr.result as string);
-      fr.onerror = () => reject(new Error("blob 转 dataURL 失败"));
-      fr.readAsDataURL(out);
-    });
-    return { ok: true, dataUrl };
+    bitmap = await createImageBitmap(blob);
+    return { ok: true, dataUrl: await encodeScreenshot(bitmap) };
   } catch (err) {
     return { ok: false, message: `截图压缩失败: ${String(err)}` };
+  } finally {
+    bitmap?.close();
   }
 }
 
