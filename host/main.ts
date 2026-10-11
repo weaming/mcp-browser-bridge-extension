@@ -87,7 +87,6 @@ function mockRespond(msg: FrameRequest): Promise<NativeResponse> {
       { ref: 1, tag: "BUTTON", text: "登录", visible: true, rect: { x: 10, y: 10, w: 80, h: 32 } },
       { ref: 2, tag: "INPUT", type: "text", text: "搜索", visible: true, rect: { x: 10, y: 50, w: 200, h: 30 } },
     ],
-    truncated: false,
   };
   if (msg.t === "snapshot") {
     return Promise.resolve({ t: "snapshot", seq: msg.seq, url: snap.url, title: snap.title, snapshot: snap });
@@ -311,7 +310,6 @@ function snapshotText(s: Snapshot): string {
     if (n.opts?.length) line += ` 选项:${n.opts.join("|")}`;
     lines.push(line);
   }
-  if (s.truncated) lines.push("(节点过多已截断,只显示前部分)");
   return lines.join("\n");
 }
 

@@ -23,8 +23,6 @@ const SELECTOR = [
   "[onclick]",
 ].join(", ");
 
-const MAX_NODES = 120;
-
 let refMap = new Map<number, HTMLElement>();
 
 // ---------- 快照 ----------
@@ -100,7 +98,7 @@ function buildSnapshot(): Snapshot {
   const all = [...document.querySelectorAll<HTMLElement>(SELECTOR)];
   const visible = all.filter(isVisible);
   const rest = all.filter((el) => !visible.includes(el));
-  const selected = visible.concat(rest).slice(0, MAX_NODES);
+  const selected = visible.concat(rest);
 
   const nodes: SnapshotNode[] = selected.map((el, i) => {
     const n = describe(el);
@@ -120,7 +118,6 @@ function buildSnapshot(): Snapshot {
       vw: window.innerWidth,
     },
     nodes,
-    truncated: all.length > MAX_NODES,
   };
 }
 

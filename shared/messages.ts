@@ -26,7 +26,6 @@ export interface Snapshot {
   ts: number;
   scroll: { x: number; y: number; vh: number; vw: number };
   nodes: SnapshotNode[];
-  truncated: boolean;
 }
 
 // ---------- content ↔ background ----------
