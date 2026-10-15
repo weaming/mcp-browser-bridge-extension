@@ -26,16 +26,19 @@ if [[ ! "$EXT_ID" =~ ^[a-p]{32}$ ]]; then
   exit 1
 fi
 
-# host 与脚本同目录(发布包布局);开发仓库里 host 在 ../dist/(build.ts 的产物)
+# Make 可指定部署后的 host;开发构建和发布包使用各自当前的输出目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOST_PATH="$SCRIPT_DIR/browser-bridge-host"
-if [ ! -f "$HOST_PATH" ]; then
-  if [ -f "$SCRIPT_DIR/../dist/browser-bridge-host" ]; then
-    HOST_PATH="$(cd "$SCRIPT_DIR/.." && pwd)/dist/browser-bridge-host"
+HOST_PATH="${BROWSER_BRIDGE_HOST_PATH:-}"
+if [ -z "$HOST_PATH" ]; then
+  if [ -f "$SCRIPT_DIR/browser-bridge/bin/browser-bridge-host" ]; then
+    HOST_PATH="$SCRIPT_DIR/browser-bridge/bin/browser-bridge-host"
   else
-    echo "找不到 $HOST_PATH(应与脚本在同一目录,或开发仓库的 ../dist/browser-bridge-host)"
-    exit 1
+    HOST_PATH="$SCRIPT_DIR/../extension-dist/bin/browser-bridge-host"
   fi
+fi
+if [ ! -f "$HOST_PATH" ]; then
+  echo "找不到 $HOST_PATH,请先构建或部署扩展"
+  exit 1
 fi
 
 # 各浏览器候选目录
@@ -79,7 +82,8 @@ case "$SELECT" in
   chrome|chromium|edge)
     SELECTED=()
     for d in "${FOUND[@]}"; do
-      case "$d" in *"$SELECT"*) SELECTED+=("$d") ;; esac
+      dir_lower="$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')"
+      case "$dir_lower" in *"$SELECT"*) SELECTED+=("$d") ;; esac
     done
     ;;
   *)
@@ -104,6 +108,11 @@ case "$SELECT" in
     fi
     ;;
 esac
+
+if [ ${#SELECTED[@]} -eq 0 ]; then
+  echo "未找到目标浏览器目录: $SELECT"
+  exit 1
+fi
 
 # 写入 manifest
 MANIFEST=$(mktemp)

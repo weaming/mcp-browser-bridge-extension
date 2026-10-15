@@ -18,10 +18,10 @@ if ($ExtId -notmatch "^[a-p]{32}$") {
     exit 1
 }
 
-# host 与脚本同目录
-$HostPath = Join-Path $PSScriptRoot "browser-bridge-host.exe"
+# host 位于扩展目录的 bin 子目录
+$HostPath = Join-Path $PSScriptRoot "browser-bridge/bin/browser-bridge-host.exe"
 if (-not (Test-Path $HostPath)) {
-    Write-Error "找不到 $HostPath(应与脚本在同一目录)"
+    Write-Error "找不到 $HostPath(请先构建或复制扩展目录)"
     exit 1
 }
 

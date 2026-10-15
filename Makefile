@@ -1,8 +1,8 @@
 # browser-bridge 构建与部署
 #
-#   make            # = make deploy:构建 host + 扩展,并同步到 Chrome 加载目录
-#   make build      # 只构建(dist/browser-bridge-host + extension-dist/)
-#   make deploy     # 构建 + rsync 扩展到 $(EXT_DIR)
+#   make            # 构建、同步扩展并注册 native host
+#   make build      # 只构建 extension-dist/(含 bin/browser-bridge-host)
+#   make deploy     # 构建、复制扩展到 $(EXT_DIR) 并注册 host
 #   make test       # bun test(含 mock 模式 MCP API 集成测试)
 #   make typecheck  # tsc --noEmit
 #   make pack       # 发布:全平台 zip(dist/release/*.zip)
@@ -20,7 +20,7 @@ PORT ?= $(shell cat $(PORT_FILE) 2>/dev/null || echo 1234)
 # 注册 native host 的目标浏览器(--chrome / --chromium / --edge / --all)
 HOST_TARGET ?= --chrome
 
-.PHONY: all setup build ext host deploy test typecheck pack reload status clean
+.PHONY: all setup build ext sync host deploy test typecheck pack reload status clean
 
 all: deploy
 
@@ -36,15 +36,18 @@ test: ## 单元 + MCP API 集成测试(无需真浏览器)
 typecheck: ## 类型检查
 	$(BUN) x tsc --noEmit
 
-deploy: build ## 构建并同步扩展到 Chrome 加载目录
+sync: build ## 构建并同步扩展到 Chrome 加载目录
 	@test -d "$(EXT_DIR)" || { echo "扩展目录不存在: $(EXT_DIR)(Chrome 里加载的路径,可用 EXT_DIR=... 覆盖)"; exit 1; }
 	rsync -a --delete extension-dist/ "$(EXT_DIR)/"
 	@echo "deployed → $(EXT_DIR)"
 
-host: ## 注册 native messaging host(开发布局:指向 dist/browser-bridge-host)
-	@bash ./scripts/install-host.sh $(HOST_TARGET)
+host: sync ## 同步扩展并注册 native messaging host
+	@test -x "$(EXT_DIR)/bin/browser-bridge-host" || { echo "host 构建产物不存在: $(EXT_DIR)/bin/browser-bridge-host"; exit 1; }
+	@BROWSER_BRIDGE_HOST_PATH="$(EXT_DIR)/bin/browser-bridge-host" bash ./scripts/install-host.sh $(HOST_TARGET)
 
-setup: deploy host ## 首次安装:构建 host + 扩展 + 注册 host
+deploy: host ## 构建、同步扩展并注册 native host
+
+setup: deploy ## 首次安装:构建 host + 扩展 + 注册 host
 	@echo "setup 完成:若浏览器已打开,扩展重载用 make reload,manifest 变更需在 chrome://extensions 点一次重新加载"
 
 pack: ## 全平台发布包

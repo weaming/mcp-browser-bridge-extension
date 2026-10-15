@@ -39,31 +39,34 @@ async function buildExtension(): Promise<void> {
   await $`cp -r extension/icons ${extDist}/icons`;
 }
 
-// 当前平台 host(本地开发)
-await $`bun build ./host/main.ts --compile --outfile dist/browser-bridge-host`;
-await $`chmod +x dist/browser-bridge-host`;
+await buildExtension();
 
 if (BUILD_ALL) {
-  await buildExtension();
   rmSync("dist/release", { recursive: true, force: true });
 
   for (const [plat, target] of Object.entries(TARGETS)) {
     const dir = `dist/release/${plat}`;
+    const extensionDir = `${dir}/browser-bridge`;
+    const hostDir = `${extensionDir}/bin`;
     mkdirSync(dir, { recursive: true });
+    mkdirSync(hostDir, { recursive: true });
 
-    await $`bun build ./host/main.ts --compile --target ${target} --outfile ${dir}/browser-bridge-host${ext(plat)}`;
+    await $`bun build ./host/main.ts --compile --target ${target} --outfile ${hostDir}/browser-bridge-host${ext(plat)}`;
     if (!isWin(plat)) {
-      await $`chmod +x ${dir}/browser-bridge-host`;
+      await $`chmod +x ${hostDir}/browser-bridge-host`;
     }
     // 安装脚本(零依赖)+ 扩展目录放进平台包(一个 zip 全搞定)
     await $`cp scripts/install-host.sh ${dir}/install-host.sh`;
     await $`cp scripts/install-host.ps1 ${dir}/install-host.ps1`;
-    await $`cp -r extension-dist ${dir}/browser-bridge`;
+    await $`cp -r extension-dist/. ${extensionDir}/`;
     await $`cd dist/release/${plat} && zip -qr ../browser-bridge-${VERSION}-${plat}.zip .`;
     console.log(`packed ${plat} [${target}] → browser-bridge-${VERSION}-${plat}.zip`);
   }
   console.log(`release zips: dist/release/browser-bridge-${VERSION}-*.zip`);
 } else {
-  await buildExtension();
-  console.log("build ok: dist/browser-bridge-host + extension-dist/ (install scripts in scripts/)");
+  mkdirSync("extension-dist/bin", { recursive: true });
+  await $`bun build ./host/main.ts --compile --outfile extension-dist/bin/browser-bridge-host`;
+  await $`chmod +x extension-dist/bin/browser-bridge-host`;
+  await $`cp extension-dist/bin/browser-bridge-host dist/browser-bridge-host`;
+  console.log("build ok: extension-dist/ (including bin/browser-bridge-host)");
 }

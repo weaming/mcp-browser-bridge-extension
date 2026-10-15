@@ -14,7 +14,7 @@
 
 - `browser-bridge-<platform>-<arch>.zip` — 按你机器的平台选
 
-解压到任意目录(下文用 `<DIR>` 表示),目录内含 `browser-bridge/`(扩展)、`browser-bridge-host`、`install-host.sh`(Windows 为 `install-host.ps1`)。
+解压到任意目录(下文用 `<DIR>` 表示),目录内含 `browser-bridge/`(扩展及 `bin/browser-bridge-host`) 和 `install-host.sh`(Windows 为 `install-host.ps1`)。
 
 ### 2. 加载扩展
 
@@ -139,10 +139,10 @@ MV3 扩展无法监听端口,native host 是唯一通道(Chrome 官方 DevTools 
 需要 [bun](https://bun.sh)。日常开发用 `make`:
 
 ```bash
-make            # = make deploy:构建 host + 扩展,并 rsync 到 Chrome 加载目录
-make setup      # 首次安装:deploy + 注册 native host
-make build      # 只构建:dist/browser-bridge-host + extension-dist/
-make host       # 只注册 native host(HOST_TARGET=--chromium/--edge/--all 可指定)
+make            # 构建、同步扩展并注册 native host
+make setup      # 首次安装:同 make
+make build      # 只构建:extension-dist/(含 bin/browser-bridge-host)
+make host       # 同步扩展并注册 host(HOST_TARGET=--chromium/--edge/--all 可指定)
 make test       # bun test(含 mock 模式 MCP API 集成测试)
 make typecheck  # tsc --noEmit
 make pack       # 交叉编译 5 平台发布包 dist/release/*.zip
@@ -152,13 +152,13 @@ make status     # 查看 host 的 MCP 端口
 
 `EXT_DIR` 默认 `~/chrome/browser-bridge`(即 chrome://extensions 里加载的那个目录),可用 `make deploy EXT_DIR=...` 覆盖。
 
-> **生效方式**:扩展是 unpacked 加载,但 Chrome **不会**因为文件变化自动重载它 —— service worker 被扩展内的 30s 保活 alarm 长期托住,旧代码会一直活着。正确姿势:`make deploy` 之后跑 `make reload`(调 `browser_reload_extension` 工具触发 `chrome.runtime.reload()`),或手动在 chrome://extensions 点一次「重新加载」。重载后扩展会在 ≤30s 内重连 host,Chrome 会用新编译的 host 二进制重新拉起进程。
+> **生效方式**:扩展是 unpacked 加载,Chrome 不会因为文件变化自动重载它。`make` 会将扩展和 host 复制到 `EXT_DIR` 并注册 host；代码更新后跑 `make reload`(调 `browser_reload_extension` 工具触发 `chrome.runtime.reload()`),或手动在 chrome://extensions 点一次「重新加载」。
 
 手动构建(等价):
 
 ```bash
-bun run build                    # 当前平台 host + 扩展
-./scripts/install-host.sh        # 注册 host(默认内置扩展 ID)
+bun run build                    # 当前平台 host + 扩展(含 bin/browser-bridge-host)
+./scripts/install-host.sh        # 注册当前构建的 host(默认内置扩展 ID)
 bun run scripts/build.ts --all   # 交叉编译全部平台 + 发布包(发布用)
 bun test                         # 单元 + MCP API 集成测试(无需浏览器)
 ```
