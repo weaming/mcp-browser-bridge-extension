@@ -118,11 +118,30 @@ interface ChatRule {
 
 const CHAT_RULES: Record<string, ChatRule> = {
   "https://chatgpt.com": {
-    messages: (doc) =>
-      [...doc.querySelectorAll<HTMLElement>("[data-message-author-role]")].map((el) => ({
+    messages: (doc) => {
+      const labels = [...doc.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")]
+        .map((heading) => {
+          const label = (heading.textContent ?? "").replace(/\s+/g, " ").trim();
+          const isUser = /^(?:你说|you said)[：:]$/i.test(label);
+          const isAssistant = /^(?:chatgpt 说|chatgpt said)[：:]$/i.test(label);
+          return { heading, isUser, isMessage: isUser || isAssistant };
+        })
+        .filter((item) => item.isMessage);
+
+      if (labels.length) {
+        return labels.flatMap(({ heading, isUser }) => {
+          const el = heading.parentElement;
+          if (!el) return [];
+          heading.remove();
+          return [{ el, isUser }];
+        });
+      }
+
+      return [...doc.querySelectorAll<HTMLElement>("[data-message-author-role]")].map((el) => ({
         el,
         isUser: el.getAttribute("data-message-author-role") === "user",
-      })),
+      }));
+    },
   },
   "https://gemini.google.com": {
     headingLevel: 1,
